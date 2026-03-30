@@ -16,7 +16,7 @@ const N8N_BASIC_PASS = "pass123!@#";
 const N8N_CUSTOM_HEADER_NAME = "X-Webhook-Token";
 const N8N_CUSTOM_HEADER_VALUE = "COLOCAR_VALOR_CABECALHO_AQUI";
 
-const CHUNK_DURATION_MS = 30_000;
+const CHUNK_DURATION_MS = 45_000;
 const IDENTIFICACAO_DURACAO_MAX_MS = 6_000;
 const LOG_LIMITE = 120;
 const AUDIO_BITS_PER_SECOND = 16_000;
@@ -47,7 +47,8 @@ const estado = {
 
   filaChunks: [],
   filaProcessando: false,
-  timerInterval: null
+  timerInterval: null,
+  chunkInterval: null
 };
 
 const refs = {};
@@ -264,9 +265,14 @@ async function iniciarEntrevista() {
       logEvento("Entrevista começou a gravar.", { interviewId: estado.interviewId });
       estado.isInterviewRunning = true;
       alternarUiDuranteEntrevista(true);
+      refs.transcriptionSection.classList.remove("hidden");
+      if (!estado.transcricaoAcumulada.trim()) {
+        refs.transcriptionText.textContent = "Aguardando retorno da transcrição em tempo real...";
+      }
       setStatusEntrevista("Entrevista em andamento.", "status-ok");
       registrarLog(`Entrevista iniciada (ID ${estado.interviewId}).`, "info");
       iniciarCronometro();
+      iniciarRotacaoChunks();
     };
 
     recorder.ondataavailable = (event) => {
@@ -306,6 +312,7 @@ async function iniciarEntrevista() {
     recorder.onstop = () => {
       logEvento("Captação da entrevista parada.");
       estado.isInterviewRunning = false;
+      pararRotacaoChunks();
       finalizarCronometro();
       limparRecursosEntrevista();
       registrarLog("Captação de áudio finalizada.", "info");
@@ -320,7 +327,7 @@ async function iniciarEntrevista() {
       }
     };
 
-    recorder.start(CHUNK_DURATION_MS);
+    recorder.start();
   } catch (error) {
     logEvento("Erro ao iniciar entrevista.", { erro: mensagemErro(error) }, "error");
     setStatusEntrevista("Não foi possível iniciar a entrevista. Verifique o microfone.", "status-error");
@@ -344,6 +351,11 @@ async function finalizarEntrevista() {
   setStatusEntrevista("Finalizando entrevista...", "status-warning");
 
   if (estado.isInterviewRunning && estado.interviewRecorder && estado.interviewRecorder.state !== "inactive") {
+    try {
+      estado.interviewRecorder.requestData();
+    } catch (error) {
+      logEvento("Falha ao forçar fechamento do chunk antes de parar.", { erro: mensagemErro(error) }, "warn");
+    }
     estado.interviewRecorder.stop();
   }
 
@@ -377,7 +389,11 @@ async function processarFilaChunks() {
 async function processarChunk(blobOriginal, chunkIndex, chunkStartMs, chunkEndMs) {
   const duracao = Math.max(0, chunkEndMs - chunkStartMs);
   logEvento("Processando chunk.", { chunkIndex, size: blobOriginal.size, chunkStartMs, chunkEndMs, duracao });
-  setStatusEntrevista(`Processando chunk ${chunkIndex}...`, "status-warning");
+  if (estado.isInterviewRunning) {
+    setStatusEntrevista(`Entrevista em andamento. Processando chunk ${chunkIndex} em paralelo...`, "status-ok");
+  } else {
+    setStatusEntrevista(`Processando chunk ${chunkIndex}...`, "status-warning");
+  }
 
   try {
     const blobFinal = await fundirPrefixoEntrevistadorComChunk(estado.interviewerBlob, blobOriginal);
@@ -403,7 +419,11 @@ async function processarChunk(blobOriginal, chunkIndex, chunkStartMs, chunkEndMs
       registrarLog(`Chunk ${chunkIndex} processado sem texto de transcrição reconhecido.`, "info");
     }
 
-    setStatusEntrevista(`Chunk ${chunkIndex} enviado com sucesso.`, "status-ok");
+    if (estado.isInterviewRunning) {
+      setStatusEntrevista(`Entrevista em andamento. Último chunk confirmado: ${chunkIndex}.`, "status-ok");
+    } else {
+      setStatusEntrevista(`Chunk ${chunkIndex} enviado com sucesso.`, "status-ok");
+    }
   } catch (error) {
     logEvento("Erro ao processar chunk.", { chunkIndex, erro: mensagemErro(error) }, "error");
     const msg = `Falha ao processar chunk ${chunkIndex}: ${mensagemErro(error)}`;
@@ -624,7 +644,7 @@ function alternarUiDuranteEntrevista(ativa) {
   refs.btnIdentificar.disabled = ativa;
   refs.recordingDot.classList.toggle("hidden", !ativa);
   refs.recordingLabel.textContent = ativa ? "Microfone ativo" : "Microfone inativo";
-  refs.transcriptionSection.classList.toggle("hidden", true);
+  refs.transcriptionSection.classList.toggle("hidden", !ativa && !estado.transcricaoAcumulada.trim());
 }
 
 function iniciarCronometro() {
@@ -792,12 +812,42 @@ function limparRecursosIdentificacao() {
 }
 
 function limparRecursosEntrevista() {
+  pararRotacaoChunks();
+
   if (estado.interviewStream) {
     estado.interviewStream.getTracks().forEach((track) => track.stop());
     estado.interviewStream = null;
   }
 
   estado.interviewRecorder = null;
+}
+
+function iniciarRotacaoChunks() {
+  pararRotacaoChunks();
+  estado.chunkInterval = window.setInterval(() => {
+    if (!estado.isInterviewRunning || !estado.interviewRecorder) {
+      return;
+    }
+    if (estado.interviewRecorder.state !== "recording") {
+      return;
+    }
+    try {
+      estado.interviewRecorder.requestData();
+      logEvento("requestData acionado para gerar próximo chunk.", {
+        interviewId: estado.interviewId,
+        chunkDuracaoMs: CHUNK_DURATION_MS
+      });
+    } catch (error) {
+      logEvento("Falha ao solicitar requestData do chunk.", { erro: mensagemErro(error) }, "warn");
+    }
+  }, CHUNK_DURATION_MS);
+}
+
+function pararRotacaoChunks() {
+  if (estado.chunkInterval) {
+    window.clearInterval(estado.chunkInterval);
+    estado.chunkInterval = null;
+  }
 }
 
 function esperar(ms) {

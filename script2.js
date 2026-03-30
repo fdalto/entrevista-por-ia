@@ -37,7 +37,11 @@ const state = {
   calibrando: null,
   calibracaoBuffer: [],
   segmentosMarcados: [],
-  transcricaoFinalCorrida: ""
+  transcricaoFinalPartes: [],
+  interimAtual: "",
+  aguardandoFlushFinal: false,
+  finalizarRecognitionResolve: null,
+  finalizarRecognitionTimer: null
 };
 
 boot();
@@ -347,9 +351,16 @@ async function iniciarEntrevista() {
     await setupAudioEngine();
     state.timeline = [];
     state.segmentosMarcados = [];
-    state.transcricaoFinalCorrida = "";
+    state.transcricaoFinalPartes = [];
+    state.interimAtual = "";
+    state.aguardandoFlushFinal = false;
+    state.finalizarRecognitionResolve = null;
+    if (state.finalizarRecognitionTimer) {
+      window.clearTimeout(state.finalizarRecognitionTimer);
+      state.finalizarRecognitionTimer = null;
+    }
     els.resultadoSegmentos.textContent = "";
-    els.transcricaoFinal.textContent = "";
+    atualizarTranscricaoFinalUI();
 
     iniciarRecognition();
     state.entrevistaAtiva = true;
@@ -394,7 +405,16 @@ function iniciarRecognition() {
       }
       if (resultado.isFinal) {
         fecharSegmento(texto);
-        appendTranscricaoFinal(texto);
+        state.transcricaoFinalPartes.push(texto);
+        state.interimAtual = "";
+        debug(`trecho final consolidado: ${texto}`);
+        atualizarTranscricaoFinalUI();
+      } else {
+        if (state.interimAtual !== texto) {
+          state.interimAtual = texto;
+          debug(`interim atualizado: ${texto}`);
+          atualizarTranscricaoFinalUI();
+        }
       }
     }
   };
@@ -405,6 +425,17 @@ function iniciarRecognition() {
 
   recognition.onend = () => {
     state.recognitionRunning = false;
+    if (state.aguardandoFlushFinal && state.finalizarRecognitionResolve) {
+      const resolve = state.finalizarRecognitionResolve;
+      state.finalizarRecognitionResolve = null;
+      if (state.finalizarRecognitionTimer) {
+        window.clearTimeout(state.finalizarRecognitionTimer);
+        state.finalizarRecognitionTimer = null;
+      }
+      state.aguardandoFlushFinal = false;
+      resolve();
+      return;
+    }
     if (state.entrevistaAtiva) {
       try {
         recognition.start();
@@ -489,19 +520,15 @@ async function finalizarEntrevista() {
   }
 
   state.entrevistaAtiva = false;
-  els.btnIniciar.disabled = false;
+  els.btnIniciar.disabled = true;
   els.btnFinalizar.disabled = true;
 
-  if (state.recognition && state.recognitionRunning) {
-    try {
-      state.recognition.stop();
-    } catch (e) {
-      debug(`Aviso ao parar recognition: ${e.message || String(e)}`);
-    }
-  }
+  await aguardarParadaRecognition();
+  flushInterimFinalSeNecessario();
 
   await teardownAudioEngine();
   state.recognitionRunning = false;
+  els.btnIniciar.disabled = false;
   setStatus("Status: entrevista finalizada.");
   debug("Entrevista finalizada e recursos liberados.");
 }
@@ -519,19 +546,72 @@ async function enviarParaIA() {
   }
 }
 
-function appendTranscricaoFinal(texto) {
-  const trecho = (texto || "").trim();
-  if (!trecho) {
-    return;
-  }
-  const separador = state.transcricaoFinalCorrida ? " " : "";
-  state.transcricaoFinalCorrida = `${state.transcricaoFinalCorrida}${separador}${trecho}`.trim();
-  els.transcricaoFinal.textContent = state.transcricaoFinalCorrida;
+function atualizarTranscricaoFinalUI() {
+  const consolidado = obterTranscricaoFinalConsolidada();
+  const interim = (state.interimAtual || "").trim();
+  const textoVisivel = interim
+    ? `${consolidado}${consolidado ? "\n" : ""}[em processamento] ${interim}`
+    : consolidado;
+
+  els.transcricaoFinal.innerText = textoVisivel;
   els.transcricaoFinal.scrollTop = els.transcricaoFinal.scrollHeight;
 }
 
+function obterTranscricaoFinalConsolidada() {
+  return state.transcricaoFinalPartes.join(" ").trim();
+}
+
+async function aguardarParadaRecognition() {
+  if (!state.recognition || !state.recognitionRunning) {
+    return;
+  }
+
+  state.aguardandoFlushFinal = true;
+  await new Promise((resolve) => {
+    let resolvido = false;
+
+    const concluir = () => {
+      if (resolvido) {
+        return;
+      }
+      resolvido = true;
+      state.finalizarRecognitionResolve = null;
+      state.aguardandoFlushFinal = false;
+      if (state.finalizarRecognitionTimer) {
+        window.clearTimeout(state.finalizarRecognitionTimer);
+        state.finalizarRecognitionTimer = null;
+      }
+      resolve();
+    };
+
+    state.finalizarRecognitionResolve = concluir;
+    state.finalizarRecognitionTimer = window.setTimeout(() => {
+      debug("timeout aguardando onend do recognition para flush final.");
+      concluir();
+    }, 1000);
+
+    try {
+      state.recognition.stop();
+    } catch (e) {
+      debug(`Aviso ao parar recognition: ${e.message || String(e)}`);
+      concluir();
+    }
+  });
+}
+
+function flushInterimFinalSeNecessario() {
+  const trecho = (state.interimAtual || "").trim();
+  if (!trecho) {
+    return;
+  }
+  state.transcricaoFinalPartes.push(trecho);
+  state.interimAtual = "";
+  debug(`flush final aplicado: ${trecho}`);
+  atualizarTranscricaoFinalUI();
+}
+
 function montarPromptParaIA() {
-  const transcricaoFinal = (els.transcricaoFinal.innerText || "").trim();
+  const transcricaoFinal = obterTranscricaoFinalConsolidada();
   const segmentosMarcados = (els.resultadoSegmentos.innerText || "").trim();
 
   return `Você receberá dois blocos de texto da mesma conversa.
