@@ -11,7 +11,8 @@ const els = {
   btnEnviar: document.getElementById("btnEnviar"),
   status: document.getElementById("status"),
   debug: document.getElementById("debug"),
-  resultado: document.getElementById("resultado")
+  resultadoSegmentos: document.getElementById("resultadoSegmentos"),
+  transcricaoFinal: document.getElementById("transcricaoFinal")
 };
 
 const state = {
@@ -35,7 +36,8 @@ const state = {
   nomeIndividuo2: "Individuo 2",
   calibrando: null,
   calibracaoBuffer: [],
-  segmentos: []
+  segmentosMarcados: [],
+  transcricaoFinalCorrida: ""
 };
 
 boot();
@@ -344,8 +346,10 @@ async function iniciarEntrevista() {
   try {
     await setupAudioEngine();
     state.timeline = [];
-    state.segmentos = [];
-    els.resultado.textContent = "";
+    state.segmentosMarcados = [];
+    state.transcricaoFinalCorrida = "";
+    els.resultadoSegmentos.textContent = "";
+    els.transcricaoFinal.textContent = "";
 
     iniciarRecognition();
     state.entrevistaAtiva = true;
@@ -390,6 +394,7 @@ function iniciarRecognition() {
       }
       if (resultado.isFinal) {
         fecharSegmento(texto);
+        appendTranscricaoFinal(texto);
       }
     }
   };
@@ -422,8 +427,8 @@ function fecharSegmento(textoFinal) {
   const subsegmentos = quebrarSegmentoPorTrocaDeSpeaker(textoFinal, janela);
   if (subsegmentos.length) {
     for (let i = 0; i < subsegmentos.length; i += 1) {
-      state.segmentos.push(subsegmentos[i]);
-      appendResultado(subsegmentos[i]);
+      state.segmentosMarcados.push(subsegmentos[i]);
+      appendSegmentoMarcado(subsegmentos[i]);
     }
     return;
   }
@@ -439,8 +444,8 @@ function fecharSegmento(textoFinal) {
     pit: medias.pit,
     texto: textoFinal
   };
-  state.segmentos.push(unico);
-  appendResultado(unico);
+  state.segmentosMarcados.push(unico);
+  appendSegmentoMarcado(unico);
 }
 
 function classificarSegmento(features) {
@@ -468,14 +473,14 @@ function classificarSegmento(features) {
   return { spk: base, conf, delta };
 }
 
-function appendResultado(seg) {
+function appendSegmentoMarcado(seg) {
   const linha = document.createElement("div");
   linha.className = "linha-segmento";
   linha.textContent =
     `{spk=${seg.spk}, conf=${seg.conf.toFixed(2)}, delta=${seg.delta.toFixed(2)}, ` +
     `ch=${seg.ch.toFixed(2)}, vol=${seg.vol.toFixed(2)}, pit=${seg.pit.toFixed(2)}} ${seg.texto}`;
-  els.resultado.appendChild(linha);
-  els.resultado.scrollTop = els.resultado.scrollHeight;
+  els.resultadoSegmentos.appendChild(linha);
+  els.resultadoSegmentos.scrollTop = els.resultadoSegmentos.scrollHeight;
 }
 
 async function finalizarEntrevista() {
@@ -501,11 +506,108 @@ async function finalizarEntrevista() {
   debug("Entrevista finalizada e recursos liberados.");
 }
 
-function enviarParaIA() {
-  const texto = els.resultado.textContent.trim();
-  console.log(texto);
-  setStatus("Status: conteúdo enviado para console (placeholder IA).");
-  debug("Botão Enviar para IA acionado (console.log).");
+async function enviarParaIA() {
+  const promptMontado = montarPromptParaIA();
+  try {
+    await copiarTextoParaClipboard(promptMontado);
+    setStatus("Status: prompt para IA copiado para a área de transferência.");
+    debug("Prompt para IA montado e copiado para a área de transferência.");
+    console.log(promptMontado);
+  } catch (error) {
+    setStatus("Status: falha ao copiar o prompt para a área de transferência.");
+    debug(`Erro ao copiar prompt para IA: ${error.message || String(error)}`);
+  }
+}
+
+function appendTranscricaoFinal(texto) {
+  const trecho = (texto || "").trim();
+  if (!trecho) {
+    return;
+  }
+  const separador = state.transcricaoFinalCorrida ? " " : "";
+  state.transcricaoFinalCorrida = `${state.transcricaoFinalCorrida}${separador}${trecho}`.trim();
+  els.transcricaoFinal.textContent = state.transcricaoFinalCorrida;
+  els.transcricaoFinal.scrollTop = els.transcricaoFinal.scrollHeight;
+}
+
+function montarPromptParaIA() {
+  const transcricaoFinal = (els.transcricaoFinal.innerText || "").trim();
+  const segmentosMarcados = (els.resultadoSegmentos.innerText || "").trim();
+
+  return `Você receberá dois blocos de texto da mesma conversa.
+
+BLOCO 1 — TRANSCRIÇÃO CORRIDA FINAL:
+Este bloco contém a transcrição corrida formada apenas pelos trechos finais reconhecidos pelo mecanismo de fala. Em geral, ele preserva melhor as palavras reconhecidas, mas não identifica com segurança quem falou cada trecho.
+
+BLOCO 2 — SEGMENTOS MARCADOS:
+Este bloco contém segmentos menores com tentativa automática de identificar o interlocutor. Cada linha vem no formato:
+{spk=..., conf=..., delta=..., ch=..., vol=..., pit=...} texto
+
+Interpretação:
+
+* spk: sugestão automática de speaker. Pode vir como nome, nome com interrogação, ou apenas "?".
+* conf: confiança da classificação local.
+* delta: diferença de distância entre os dois perfis calibrados. Quanto maior, mais forte a distinção.
+* ch, vol, pit: features acústicas auxiliares.
+* texto: trecho associado àquela marcação.
+
+Sua tarefa:
+
+1. Reconstruir a conversa completa com pontuação adequada e linguagem natural.
+2. Usar a TRANSCRIÇÃO CORRIDA FINAL como base principal para preservar as palavras corretamente.
+3. Usar os SEGMENTOS MARCADOS como apoio para identificar quem falou cada trecho.
+4. Quando houver conflito entre os dois blocos, priorize o texto do BLOCO 1 e use o BLOCO 2 para orientar a atribuição do interlocutor.
+5. Quando a identificação do interlocutor estiver incerta, inferir pelo contexto conversacional, continuidade da fala, alternância natural entre os participantes e pelas marcações disponíveis.
+6. Se ainda assim houver dúvida real, mantenha o speaker como [Indefinido].
+7. Junte fragmentos curtos quebrados quando claramente fizerem parte da mesma frase.
+8. Corrija apenas pontuação, capitalização e pequenas quebras de fluidez. Não invente conteúdo novo.
+
+Saída desejada:
+
+* Escreva a conversa em formato de diálogo.
+* Um speaker por linha, por exemplo:
+  [Vitor]: ...
+  [Bianca]: ...
+* Não inclua explicações adicionais.
+* Entregue apenas a conversa final organizada.
+
+BLOCO 1 — TRANSCRIÇÃO CORRIDA FINAL:
+${transcricaoFinal}
+
+BLOCO 2 — SEGMENTOS MARCADOS:
+${segmentosMarcados}`;
+}
+
+async function copiarTextoParaClipboard(texto) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    try {
+      await navigator.clipboard.writeText(texto);
+      return;
+    } catch (error) {
+      copiarTextoFallback(texto);
+      return;
+    }
+  }
+  copiarTextoFallback(texto);
+}
+
+function copiarTextoFallback(texto) {
+  const textarea = document.createElement("textarea");
+  textarea.value = texto;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  const ok = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!ok) {
+    throw new Error("document.execCommand('copy') retornou false.");
+  }
 }
 
 function quebrarSegmentoPorTrocaDeSpeaker(textoFinal, janela) {

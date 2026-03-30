@@ -131,6 +131,17 @@ button:disabled {
   padding: 0 14px;
 }
 
+.resultado-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.resultado-coluna h3 {
+  margin: 0 0 6px;
+  font-size: 0.95rem;
+}
+
 .debug {
   min-height: 90px;
   max-height: 180px;
@@ -164,4 +175,10 @@ button:disabled {
 
 .linha-segmento:last-child {
   border-bottom: none;
+}
+
+@media (min-width: 840px) {
+  .resultado-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
