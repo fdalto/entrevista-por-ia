@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Entrevista com Transcrição</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="header card">
+      <h1>Entrevista com Transcrição</h1>
+      <p>Grave a identificação do entrevistador e depois inicie a entrevista.</p>
+    </header>
+
+    <section class="card" aria-labelledby="titulo-identificacao">
+      <div class="section-title-row">
+        <h2 id="titulo-identificacao">Identificar entrevistador</h2>
+        <span id="interviewerStateBadge" class="badge badge-ready">Pronto</span>
+      </div>
+      <p class="helper-text">Fale: "Meu nome é [seu nome]"</p>
+      <button id="btnIdentificar" class="btn btn-primary" type="button">
+        Identificar entrevistador
+      </button>
+      <p id="interviewerStatus" class="status-text" aria-live="polite">
+        Grave uma identificação curta antes de iniciar a entrevista.
+      </p>
+    </section>
+
+    <section class="card" aria-labelledby="titulo-entrevista">
+      <h2 id="titulo-entrevista">Entrevista</h2>
+      <div class="btn-group">
+        <button id="btnIniciar" class="btn btn-start" type="button">Iniciar entrevista</button>
+        <button id="btnFinalizar" class="btn btn-stop" type="button" disabled>Finalizar entrevista</button>
+        <button id="btnResetar" class="btn btn-secondary hidden" type="button">Nova entrevista</button>
+      </div>
+
+      <div class="recording-panel">
+        <div class="recording-row">
+          <span id="recordingDot" class="recording-dot hidden" aria-hidden="true"></span>
+          <span id="recordingLabel">Microfone inativo</span>
+        </div>
+        <p id="tempoEntrevista">Tempo da entrevista: 00:00</p>
+        <p id="chunksEnviados">Chunks enviados: 0</p>
+        <p id="respostasRecebidas">Respostas recebidas: 0</p>
+        <p id="interviewStatus" class="status-text" aria-live="polite">
+          Aguardando início da entrevista.
+        </p>
+      </div>
+
+      <div class="log-box">
+        <p class="log-title">Log de processamento</p>
+        <ul id="logList" class="log-list"></ul>
+      </div>
+    </section>
+
+    <section id="transcriptionSection" class="card hidden" aria-labelledby="titulo-transcricao">
+      <h2 id="titulo-transcricao">Transcrição da entrevista</h2>
+      <div id="transcriptionText" class="transcription-box" role="region" aria-live="polite"></div>
+      <button id="btnCopiar" class="btn btn-primary" type="button" disabled>
+        Copiar transcrição
+      </button>
+      <p id="copyFeedback" class="status-text" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script src="script.js" defer></script>
+</body>
+</html>
