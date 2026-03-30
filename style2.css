@@ -1,0 +1,167 @@
+:root {
+  --bg: #edf4f3;
+  --card: #ffffff;
+  --text: #142028;
+  --muted: #50616b;
+  --border: #ccd8de;
+  --primary: #0e6f8d;
+  --primary-hover: #0a5970;
+  --danger: #b03a3a;
+  --danger-hover: #8f2f2f;
+  --ok: #167e4c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 10% -5%, #d6e9f9 0%, transparent 50%),
+    radial-gradient(circle at 100% 0%, #d8f0e8 0%, transparent 45%),
+    var(--bg);
+}
+
+.app {
+  width: min(920px, 100%);
+  margin: 0 auto;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+h1,
+h2 {
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.5rem;
+}
+
+h2 {
+  font-size: 1.05rem;
+  margin-bottom: 8px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  box-shadow: 0 8px 20px rgba(20, 32, 40, 0.08);
+}
+
+.buttons {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+}
+
+.calibracao-buttons {
+  margin-bottom: 8px;
+}
+
+.acao-buttons {
+  margin-top: 8px;
+}
+
+.orientacao {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  min-height: 44px;
+  cursor: pointer;
+  font-weight: 700;
+  color: #fff;
+  background: var(--primary);
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+#btnFinalizar {
+  background: var(--danger);
+}
+
+#btnFinalizar:hover:not(:disabled) {
+  background: var(--danger-hover);
+}
+
+.status {
+  margin: 10px 0 0;
+  font-weight: 700;
+  color: var(--ok);
+}
+
+.resultado-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.resultado-header h2 {
+  margin: 0;
+}
+
+.resultado-header #btnEnviar {
+  width: auto;
+  min-width: 140px;
+  padding: 0 14px;
+}
+
+.debug {
+  min-height: 90px;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: #f9fcfd;
+  color: var(--muted);
+  font-family: "Courier New", monospace;
+  font-size: 0.86rem;
+  white-space: pre-wrap;
+}
+
+.resultado {
+  min-height: 140px;
+  max-height: 360px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fbfeff;
+  font-family: "Courier New", monospace;
+  white-space: pre-wrap;
+}
+
+.linha-segmento {
+  padding: 4px 0;
+  border-bottom: 1px solid #e5edf2;
+}
+
+.linha-segmento:last-child {
+  border-bottom: none;
+}

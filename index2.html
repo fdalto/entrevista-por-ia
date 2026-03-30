@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Entrevista com Diarização Simples</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style2.css">
+</head>
+<body>
+  <main class="app">
+    <h1>Transcrição com 2 Speakers</h1>
+
+    <section class="card controls">
+      <div class="buttons calibracao-buttons">
+        <button id="btnCalibrarIndividuo1" type="button">Calibrar Individuo 1</button>
+        <button id="btnCalibrarIndividuo2" type="button">Calibrar Individuo 2</button>
+      </div>
+      <p class="orientacao">Para calibração fale "Meu nome é SEU_NOME".</p>
+      <div class="buttons acao-buttons">
+        <button id="btnIniciar" type="button">Iniciar Entrevista</button>
+        <button id="btnFinalizar" type="button" disabled>Finalizar Entrevista</button>
+      </div>
+      <p id="status" class="status">Status: aguardando ação.</p>
+    </section>
+
+    <section class="card">
+      <h2>Debug</h2>
+      <div id="debug" class="debug"></div>
+    </section>
+
+    <section class="card">
+      <div class="resultado-header">
+        <h2>Resultado Final</h2>
+        <button id="btnEnviar" type="button">Enviar para IA</button>
+      </div>
+      <div id="resultado" class="resultado"></div>
+    </section>
+  </main>
+
+  <script src="script2.js" defer></script>
+</body>
+</html>
