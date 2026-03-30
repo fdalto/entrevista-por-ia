@@ -17,11 +17,13 @@ const N8N_CUSTOM_HEADER_NAME = "X-Webhook-Token";
 const N8N_CUSTOM_HEADER_VALUE = "COLOCAR_VALOR_CABECALHO_AQUI";
 
 const CHUNK_DURATION_MS = 45_000;
+const CHUNK_SEND_MAX_TENTATIVAS = 3;
+const CHUNK_SEND_RETRY_MS = 1500;
+const CHUNK_RESPOSTA_VAZIA_RETRY_MAX = 1;
+const CHUNK_RESPOSTA_VAZIA_RETRY_MS = 1200;
 const IDENTIFICACAO_DURACAO_MAX_MS = 6_000;
 const LOG_LIMITE = 120;
 const AUDIO_BITS_PER_SECOND = 16_000;
-const FUSAO_SAMPLE_RATE_HZ = 16_000;
-const FUSAO_CANAIS = 1;
 
 const estado = {
   interviewerBlob: null,
@@ -47,8 +49,7 @@ const estado = {
 
   filaChunks: [],
   filaProcessando: false,
-  timerInterval: null,
-  chunkInterval: null
+  timerInterval: null
 };
 
 const refs = {};
@@ -272,7 +273,6 @@ async function iniciarEntrevista() {
       setStatusEntrevista("Entrevista em andamento.", "status-ok");
       registrarLog(`Entrevista iniciada (ID ${estado.interviewId}).`, "info");
       iniciarCronometro();
-      iniciarRotacaoChunks();
     };
 
     recorder.ondataavailable = (event) => {
@@ -290,7 +290,8 @@ async function iniciarEntrevista() {
         blobOriginal: event.data,
         chunkIndex: estado.chunkIndex,
         chunkStartMs,
-        chunkEndMs
+        chunkEndMs,
+        tentativas: 0
       });
       logEvento("Chunk da entrevista enfileirado.", {
         chunkIndex: estado.chunkIndex,
@@ -312,7 +313,6 @@ async function iniciarEntrevista() {
     recorder.onstop = () => {
       logEvento("Captação da entrevista parada.");
       estado.isInterviewRunning = false;
-      pararRotacaoChunks();
       finalizarCronometro();
       limparRecursosEntrevista();
       registrarLog("Captação de áudio finalizada.", "info");
@@ -327,7 +327,7 @@ async function iniciarEntrevista() {
       }
     };
 
-    recorder.start();
+    recorder.start(CHUNK_DURATION_MS);
   } catch (error) {
     logEvento("Erro ao iniciar entrevista.", { erro: mensagemErro(error) }, "error");
     setStatusEntrevista("Não foi possível iniciar a entrevista. Verifique o microfone.", "status-error");
@@ -351,11 +351,6 @@ async function finalizarEntrevista() {
   setStatusEntrevista("Finalizando entrevista...", "status-warning");
 
   if (estado.isInterviewRunning && estado.interviewRecorder && estado.interviewRecorder.state !== "inactive") {
-    try {
-      estado.interviewRecorder.requestData();
-    } catch (error) {
-      logEvento("Falha ao forçar fechamento do chunk antes de parar.", { erro: mensagemErro(error) }, "warn");
-    }
     estado.interviewRecorder.stop();
   }
 
@@ -375,7 +370,7 @@ async function processarFilaChunks() {
 
   while (estado.filaChunks.length > 0) {
     const item = estado.filaChunks.shift();
-    await processarChunk(item.blobOriginal, item.chunkIndex, item.chunkStartMs, item.chunkEndMs);
+    await processarChunk(item.blobOriginal, item.chunkIndex, item.chunkStartMs, item.chunkEndMs, item.tentativas);
   }
 
   estado.filaProcessando = false;
@@ -386,9 +381,16 @@ async function processarFilaChunks() {
   }
 }
 
-async function processarChunk(blobOriginal, chunkIndex, chunkStartMs, chunkEndMs) {
+async function processarChunk(blobOriginal, chunkIndex, chunkStartMs, chunkEndMs, tentativasIniciais = 0) {
   const duracao = Math.max(0, chunkEndMs - chunkStartMs);
-  logEvento("Processando chunk.", { chunkIndex, size: blobOriginal.size, chunkStartMs, chunkEndMs, duracao });
+  logEvento("Processando chunk.", {
+    chunkIndex,
+    size: blobOriginal.size,
+    chunkStartMs,
+    chunkEndMs,
+    duracao,
+    tentativasIniciais
+  });
   if (estado.isInterviewRunning) {
     setStatusEntrevista(`Entrevista em andamento. Processando chunk ${chunkIndex} em paralelo...`, "status-ok");
   } else {
@@ -396,22 +398,29 @@ async function processarChunk(blobOriginal, chunkIndex, chunkStartMs, chunkEndMs
   }
 
   try {
-    const blobFinal = await fundirPrefixoEntrevistadorComChunk(estado.interviewerBlob, blobOriginal);
+    const resultadoFusao = await fundirPrefixoEntrevistadorComChunk(estado.interviewerBlob, blobOriginal);
+    const blobFinal = resultadoFusao.blobFinal;
     const metadados = {
       chunkIndex,
       interviewId: estado.interviewId,
       chunkStartMs,
       chunkEndMs,
       chunkDurationMs: duracao,
-      hasInterviewerPrefix: true
+      hasInterviewerPrefix: resultadoFusao.hasInterviewerPrefix
     };
 
-    const resposta = await enviarChunkParaN8n(blobFinal, metadados);
+    const resposta = await enviarChunkParaN8nComRetry(blobFinal, metadados, tentativasIniciais);
+    const textoExtraido = await garantirRespostaComTexto(
+      resposta,
+      blobFinal,
+      metadados,
+      chunkIndex,
+      CHUNK_RESPOSTA_VAZIA_RETRY_MAX
+    );
     logEvento("Resposta recebida do n8n para chunk.", { chunkIndex, resposta });
     estado.respostasRecebidas += 1;
     atualizarContadores();
 
-    const textoExtraido = extrairTextoDaRespostaN8n(resposta);
     if (textoExtraido) {
       adicionarTranscricao(textoExtraido);
       registrarLog(`Chunk ${chunkIndex} processado e transcrição recebida.`, "success");
@@ -433,38 +442,33 @@ async function processarChunk(blobOriginal, chunkIndex, chunkStartMs, chunkEndMs
 }
 
 async function fundirPrefixoEntrevistadorComChunk(prefixBlob, chunkBlob) {
+  logEvento("Iniciando fusão prefixo+chunk.", {
+    prefixSize: prefixBlob?.size ?? 0,
+    prefixType: prefixBlob?.type ?? "",
+    chunkSize: chunkBlob?.size ?? 0,
+    chunkType: chunkBlob?.type ?? ""
+  });
+
   if (!prefixBlob) {
     logEvento("Fusão ignorada porque não há prefixo salvo.", null, "warn");
-    return chunkBlob;
+    return { blobFinal: chunkBlob, hasInterviewerPrefix: false };
   }
 
   /*
-    Abordagem robusta:
-    1) tenta decodificar e remontar via Web Audio API;
-    2) gera WAV mono 16k (arquivo único e válido para STT);
-    3) se falhar, fallback para concatenação binária.
+    Modo de produção:
+    - usa concatenação binária como padrão para manter o mesmo contêiner do MediaRecorder
+      e evitar variação de formato (ex.: primeiro chunk em WAV e demais em WEBM).
   */
-  try {
-    const blobWav = await fundirAudioViaWebAudio(prefixBlob, chunkBlob);
-    logEvento("Fusão concluída via WebAudio (WAV).", {
-      mimeType: blobWav.type,
-      prefixSize: prefixBlob.size,
-      chunkSize: chunkBlob.size,
-      finalSize: blobWav.size
-    });
-    return blobWav;
-  } catch (error) {
-    logEvento("Fusão WebAudio falhou. Aplicando fallback por concatenação.", { erro: mensagemErro(error) }, "warn");
-    const mimeType = detectarMimeTypeBlob(chunkBlob, prefixBlob.type || "audio/webm");
-    const blobFallback = new Blob([prefixBlob, chunkBlob], { type: mimeType });
-    logEvento("Fusão concluída via fallback binário.", {
-      mimeType,
-      prefixSize: prefixBlob.size,
-      chunkSize: chunkBlob.size,
-      finalSize: blobFallback.size
-    });
-    return blobFallback;
-  }
+  const mimeType = detectarMimeTypeBlob(chunkBlob, prefixBlob.type || "audio/webm");
+  const blobFallback = new Blob([prefixBlob, chunkBlob], { type: mimeType });
+  logEvento("Fusão binária (padrão) criada.", {
+    fallbackType: mimeType,
+    prefixSize: prefixBlob.size,
+    chunkSize: chunkBlob.size,
+    fallbackSize: blobFallback.size,
+    hasInterviewerPrefix: true
+  });
+  return { blobFinal: blobFallback, hasInterviewerPrefix: true };
 }
 
 async function enviarChunkParaN8n(blobFinal, metadados) {
@@ -518,16 +522,100 @@ async function enviarChunkParaN8n(blobFinal, metadados) {
     throw new Error(`Webhook retornou status ${response.status}${detalhe}`);
   }
 
+  const contentType = response.headers.get("content-type") || "";
+  const corpoTexto = await response.text();
   let json = {};
   try {
-    json = await response.json();
+    if (contentType.includes("application/json")) {
+      json = corpoTexto ? JSON.parse(corpoTexto) : {};
+    } else {
+      json = corpoTexto ? JSON.parse(corpoTexto) : {};
+    }
   } catch (error) {
-    logEvento("Falha ao parsear JSON do n8n.", { erro: mensagemErro(error) }, "error");
-    throw new Error("Resposta do webhook não veio em JSON válido.");
+    logEvento("Falha ao parsear resposta do n8n como JSON.", {
+      erro: mensagemErro(error),
+      contentType,
+      corpo: limitarTexto(corpoTexto, 260)
+    }, "error");
+    throw new Error(`Resposta do webhook não veio em JSON válido: ${limitarTexto(corpoTexto, 140)}`);
   }
 
   logEvento("JSON do n8n parseado com sucesso.", json);
   return json;
+}
+
+async function enviarChunkParaN8nComRetry(blobFinal, metadados, tentativasIniciais = 0) {
+  let tentativa = tentativasIniciais;
+  let ultimoErro = null;
+
+  while (tentativa < CHUNK_SEND_MAX_TENTATIVAS) {
+    tentativa += 1;
+    try {
+      logEvento("Tentativa de envio de chunk.", {
+        chunkIndex: metadados.chunkIndex,
+        tentativa,
+        maxTentativas: CHUNK_SEND_MAX_TENTATIVAS
+      });
+      const resposta = await enviarChunkParaN8n(blobFinal, metadados);
+      if (tentativa > 1) {
+        registrarLog(
+          `Chunk ${metadados.chunkIndex} enviado com sucesso na tentativa ${tentativa}.`,
+          "success"
+        );
+      }
+      return resposta;
+    } catch (error) {
+      ultimoErro = error;
+      const ultimoRound = tentativa >= CHUNK_SEND_MAX_TENTATIVAS;
+      logEvento("Falha em tentativa de envio de chunk.", {
+        chunkIndex: metadados.chunkIndex,
+        tentativa,
+        erro: mensagemErro(error),
+        ultimoRound
+      }, "warn");
+
+      if (ultimoRound) {
+        break;
+      }
+
+      registrarLog(
+        `Chunk ${metadados.chunkIndex} falhou na tentativa ${tentativa}. Tentando novamente...`,
+        "info"
+      );
+      await esperar(CHUNK_SEND_RETRY_MS);
+    }
+  }
+
+  throw ultimoErro || new Error("Falha desconhecida no envio do chunk.");
+}
+
+async function garantirRespostaComTexto(
+  respostaInicial,
+  blobFinal,
+  metadados,
+  chunkIndex,
+  maxRetriesSemTexto
+) {
+  let respostaAtual = respostaInicial;
+  let texto = extrairTextoDaRespostaN8n(respostaAtual);
+
+  for (let i = 0; i < maxRetriesSemTexto && !texto; i += 1) {
+    const tentativaSemTexto = i + 1;
+    logEvento("Resposta sem texto. Reenvio para nova tentativa de transcrição.", {
+      chunkIndex,
+      tentativaSemTexto,
+      maxRetriesSemTexto
+    }, "warn");
+    registrarLog(
+      `Chunk ${chunkIndex} retornou sem texto. Reenviando (${tentativaSemTexto}/${maxRetriesSemTexto})...`,
+      "info"
+    );
+    await esperar(CHUNK_RESPOSTA_VAZIA_RETRY_MS);
+    respostaAtual = await enviarChunkParaN8nComRetry(blobFinal, metadados, 0);
+    texto = extrairTextoDaRespostaN8n(respostaAtual);
+  }
+
+  return texto;
 }
 
 function adicionarTranscricao(texto) {
@@ -535,8 +623,14 @@ function adicionarTranscricao(texto) {
     return;
   }
 
+  const textoSanitizado = removerLinhaIdentificacaoInicial(texto);
+  if (!textoSanitizado) {
+    logEvento("Transcrição recebida continha apenas linha de identificação e foi descartada.");
+    return;
+  }
+
   const separador = estado.transcricaoAcumulada ? "\n\n" : "";
-  estado.transcricaoAcumulada += `${separador}${texto}`;
+  estado.transcricaoAcumulada += `${separador}${textoSanitizado}`;
   refs.transcriptionText.textContent = estado.transcricaoAcumulada;
   logEvento("Transcrição acumulada atualizada.", {
     tamanhoAtual: estado.transcricaoAcumulada.length
@@ -812,42 +906,12 @@ function limparRecursosIdentificacao() {
 }
 
 function limparRecursosEntrevista() {
-  pararRotacaoChunks();
-
   if (estado.interviewStream) {
     estado.interviewStream.getTracks().forEach((track) => track.stop());
     estado.interviewStream = null;
   }
 
   estado.interviewRecorder = null;
-}
-
-function iniciarRotacaoChunks() {
-  pararRotacaoChunks();
-  estado.chunkInterval = window.setInterval(() => {
-    if (!estado.isInterviewRunning || !estado.interviewRecorder) {
-      return;
-    }
-    if (estado.interviewRecorder.state !== "recording") {
-      return;
-    }
-    try {
-      estado.interviewRecorder.requestData();
-      logEvento("requestData acionado para gerar próximo chunk.", {
-        interviewId: estado.interviewId,
-        chunkDuracaoMs: CHUNK_DURATION_MS
-      });
-    } catch (error) {
-      logEvento("Falha ao solicitar requestData do chunk.", { erro: mensagemErro(error) }, "warn");
-    }
-  }, CHUNK_DURATION_MS);
-}
-
-function pararRotacaoChunks() {
-  if (estado.chunkInterval) {
-    window.clearInterval(estado.chunkInterval);
-    estado.chunkInterval = null;
-  }
 }
 
 function esperar(ms) {
@@ -985,106 +1049,31 @@ function extrairTextoDeItemN8n(item) {
   return "";
 }
 
-async function fundirAudioViaWebAudio(prefixBlob, chunkBlob) {
-  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextCtor || typeof window.OfflineAudioContext === "undefined") {
-    throw new Error("Web Audio API indisponível para fusão robusta.");
+function removerLinhaIdentificacaoInicial(texto) {
+  const linhas = (texto || "")
+    .split(/\r?\n/)
+    .map((linha) => linha.trim())
+    .filter((linha) => linha.length > 0);
+
+  if (!linhas.length) {
+    return "";
   }
 
-  const audioContext = new AudioContextCtor();
-  try {
-    const [prefixBuffer, chunkBuffer] = await Promise.all([
-      decodificarBlobEmAudioBuffer(audioContext, prefixBlob),
-      decodificarBlobEmAudioBuffer(audioContext, chunkBlob)
-    ]);
+  const primeira = linhas[0].toLowerCase();
+  const contemIdentificacao =
+    primeira.includes("meu nome é") ||
+    primeira.includes("meu nome e") ||
+    primeira.includes("me chamo") ||
+    primeira.includes("eu sou");
 
-    const duracaoTotal = prefixBuffer.duration + chunkBuffer.duration;
-    const totalFrames = Math.max(1, Math.ceil(duracaoTotal * FUSAO_SAMPLE_RATE_HZ));
-    const offline = new OfflineAudioContext(FUSAO_CANAIS, totalFrames, FUSAO_SAMPLE_RATE_HZ);
-
-    const sourcePrefixo = offline.createBufferSource();
-    sourcePrefixo.buffer = prefixBuffer;
-    sourcePrefixo.connect(offline.destination);
-    sourcePrefixo.start(0);
-
-    const sourceChunk = offline.createBufferSource();
-    sourceChunk.buffer = chunkBuffer;
-    sourceChunk.connect(offline.destination);
-    sourceChunk.start(prefixBuffer.duration);
-
-    const audioRenderizado = await offline.startRendering();
-    return converterAudioBufferParaWavBlob(audioRenderizado);
-  } finally {
-    if (typeof audioContext.close === "function") {
-      await audioContext.close().catch(() => {});
-    }
-  }
-}
-
-async function decodificarBlobEmAudioBuffer(audioContext, blob) {
-  const buffer = await blob.arrayBuffer();
-  return decodificarAudioDataCompat(audioContext, buffer);
-}
-
-function decodificarAudioDataCompat(audioContext, arrayBuffer) {
-  return new Promise((resolve, reject) => {
-    const copia = arrayBuffer.slice(0);
-    const retorno = audioContext.decodeAudioData(
-      copia,
-      (decoded) => resolve(decoded),
-      (erro) => reject(erro)
-    );
-
-    if (retorno && typeof retorno.then === "function") {
-      retorno.then(resolve).catch(reject);
-    }
-  });
-}
-
-function converterAudioBufferParaWavBlob(audioBuffer) {
-  const numChannels = audioBuffer.numberOfChannels;
-  const sampleRate = audioBuffer.sampleRate;
-  const bitsPerSample = 16;
-  const bytesPerSample = bitsPerSample / 8;
-  const totalFrames = audioBuffer.length;
-  const dataSize = totalFrames * numChannels * bytesPerSample;
-  const wavBuffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(wavBuffer);
-
-  escreverStringDataView(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  escreverStringDataView(view, 8, "WAVE");
-  escreverStringDataView(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numChannels * bytesPerSample, true);
-  view.setUint16(32, numChannels * bytesPerSample, true);
-  view.setUint16(34, bitsPerSample, true);
-  escreverStringDataView(view, 36, "data");
-  view.setUint32(40, dataSize, true);
-
-  const canais = [];
-  for (let c = 0; c < numChannels; c += 1) {
-    canais.push(audioBuffer.getChannelData(c));
+  if (contemIdentificacao) {
+    const restante = linhas.slice(1).join("\n").trim();
+    logEvento("Linha inicial de identificação removida da transcrição.", {
+      linhaRemovida: linhas[0],
+      tamanhoRestante: restante.length
+    }, "info");
+    return restante;
   }
 
-  let offset = 44;
-  for (let i = 0; i < totalFrames; i += 1) {
-    for (let c = 0; c < numChannels; c += 1) {
-      const sample = Math.max(-1, Math.min(1, canais[c][i]));
-      const int16 = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-      view.setInt16(offset, int16, true);
-      offset += 2;
-    }
-  }
-
-  return new Blob([wavBuffer], { type: "audio/wav" });
-}
-
-function escreverStringDataView(view, offset, valor) {
-  for (let i = 0; i < valor.length; i += 1) {
-    view.setUint8(offset + i, valor.charCodeAt(i));
-  }
+  return linhas.join("\n").trim();
 }
