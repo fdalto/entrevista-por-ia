@@ -395,11 +395,12 @@ async function processarChunk(blobOriginal, chunkIndex, chunkStartMs, chunkEndMs
     estado.respostasRecebidas += 1;
     atualizarContadores();
 
-    if (resposta && typeof resposta.transcricao === "string" && resposta.transcricao.trim()) {
-      adicionarTranscricao(resposta.transcricao.trim());
+    const textoExtraido = extrairTextoDaRespostaN8n(resposta);
+    if (textoExtraido) {
+      adicionarTranscricao(textoExtraido);
       registrarLog(`Chunk ${chunkIndex} processado e transcrição recebida.`, "success");
     } else {
-      registrarLog(`Chunk ${chunkIndex} processado sem campo "transcricao".`, "info");
+      registrarLog(`Chunk ${chunkIndex} processado sem texto de transcrição reconhecido.`, "info");
     }
 
     setStatusEntrevista(`Chunk ${chunkIndex} enviado com sucesso.`, "status-ok");
@@ -459,11 +460,15 @@ async function enviarChunkParaN8n(blobFinal, metadados) {
   if (MODO_SIMULADO) {
     logEvento("MODO_SIMULADO ativo. Resposta fake será usada.", { chunkIndex: metadados.chunkIndex });
     await esperar(450 + Math.random() * 400);
-    return {
-      ok: true,
-      chunkIndex: metadados.chunkIndex,
-      transcricao: `Chunk ${metadados.chunkIndex}: transcrição simulada em ${new Date().toLocaleTimeString("pt-BR")}.`
-    };
+    return [
+      {
+        texto_final: `[Entrevistador]: Chunk ${metadados.chunkIndex} simulado em ${new Date().toLocaleTimeString("pt-BR")}.`,
+        nome_detectado: "Entrevistador",
+        tag_do_nome: "A",
+        total_segmentos: 1,
+        texto_completo: `Chunk ${metadados.chunkIndex} simulado em ${new Date().toLocaleTimeString("pt-BR")}.`
+      }
+    ];
   }
 
   const formData = new FormData();
@@ -885,6 +890,49 @@ function limitarTexto(texto, limite) {
     return texto;
   }
   return `${texto.slice(0, limite)}...`;
+}
+
+function extrairTextoDaRespostaN8n(resposta) {
+  if (!resposta) {
+    return "";
+  }
+
+  if (Array.isArray(resposta)) {
+    const textos = resposta
+      .map((item) => extrairTextoDeItemN8n(item))
+      .filter((texto) => !!texto);
+    return textos.join("\n\n");
+  }
+
+  if (typeof resposta === "object") {
+    if (Array.isArray(resposta.data)) {
+      return extrairTextoDaRespostaN8n(resposta.data);
+    }
+    return extrairTextoDeItemN8n(resposta);
+  }
+
+  return "";
+}
+
+function extrairTextoDeItemN8n(item) {
+  if (!item || typeof item !== "object") {
+    return "";
+  }
+
+  const candidatos = [
+    item.texto_final,
+    item.transcricao,
+    item.texto_completo,
+    item.texto
+  ];
+
+  for (const candidato of candidatos) {
+    if (typeof candidato === "string" && candidato.trim()) {
+      return candidato.trim();
+    }
+  }
+
+  return "";
 }
 
 async function fundirAudioViaWebAudio(prefixBlob, chunkBlob) {
