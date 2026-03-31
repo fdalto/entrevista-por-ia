@@ -12,7 +12,7 @@ const DEBUG_LOGS = true;
 const N8N_AUTH_MODE = "basic";
 const N8N_BEARER_TOKEN = "COLOCAR_BEARER_TOKEN_AQUI";
 const N8N_BASIC_USER = "entrevista-ia";
-const N8N_BASIC_PASS = "pass123!@#";
+const N8N_BASIC_PASS = "";
 const N8N_CUSTOM_HEADER_NAME = "X-Webhook-Token";
 const N8N_CUSTOM_HEADER_VALUE = "COLOCAR_VALOR_CABECALHO_AQUI";
 
