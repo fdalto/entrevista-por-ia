@@ -3,6 +3,7 @@ const FEATURE_INTERVAL_MS = 50;
 const JANELA_SEGMENTO_MS = 3000;
 const RETENCAO_TIMELINE_MS = 30000;
 const INTERIM_IDLE_FLUSH_MS = 1800;
+const PAUSA_MAXIMA_TROCA_SPEAKER_MS = 450;
 const CENTROID_MIN_HZ = 80;
 const CENTROID_MAX_HZ = 4000;
 const PESO_MINIMO_DINAMICO = 0.03;
@@ -827,6 +828,7 @@ function iniciarRecognition() {
 
 // Gera segmento classificado a partir de texto final e janela acústica recente.
 function fecharSegmento(textoFinal) {
+  console.log("[diag] executando funcao fecharSegmento");
   trace("fecharSegmento.start", { timeline: state.timeline.length, textoLen: (textoFinal || "").length }, "fechar");
   const agora = performance.now();
   const inicioJanela = agora - JANELA_SEGMENTO_MS;
@@ -863,6 +865,7 @@ function fecharSegmento(textoFinal) {
 
 // Classifica speaker comparando distância do trecho para cada assinatura.
 function classificarSegmento(features) {
+  console.log("[diag] executando funcao classificarSegmento");
   const assinaturaIndividuo1 = state.assinaturaIndividuo1;
   const assinaturaIndividuo2 = state.assinaturaIndividuo2;
 
@@ -992,6 +995,7 @@ async function aguardarParadaRecognition() {
 
 // Faz flush do interim pendente para não perder fala no encerramento.
 function flushInterimFinalSeNecessario() {
+  console.log("[diag] executando funcao flushInterimFinalSeNecessario");
   const trecho = (state.interimAtual || "").trim();
   if (!trecho) {
     console.log("[ovl] flushInterim skip: vazio");
@@ -1040,6 +1044,7 @@ function iniciarWatchdogInterim() {
 
 // Consolida novo trecho na transcrição final com estratégia de merge por sobreposição.
 function adicionarTrechoConsolidado(texto, origem = "desconhecida") {
+  console.log(`[diag] executando funcao adicionarTrechoConsolidado (${origem})`);
   const trecho = (texto || "").trim();
   if (!trecho) {
     console.log(`[ovl] consolidacao skip (${origem}): vazio`);
@@ -1097,6 +1102,7 @@ function adicionarTrechoConsolidado(texto, origem = "desconhecida") {
 
 // Combina dois trechos detectando sobreposição textual no fim/início.
 function combinarComSobreposicao(base, novo) {
+  console.log("[diag] executando funcao combinarComSobreposicao");
   console.log("[ovl] combinar start:", {
     baseLen: (base || "").length,
     novoLen: (novo || "").length
@@ -1270,6 +1276,7 @@ function copiarTextoFallback(texto) {
 
 // Tenta quebrar um texto final em subsegmentos quando há troca clara de speaker.
 function quebrarSegmentoPorTrocaDeSpeaker(textoFinal, janela) {
+  console.log("[diag] executando funcao quebrarSegmentoPorTrocaDeSpeaker");
   if (!state.assinaturaIndividuo1 || !state.assinaturaIndividuo2) {
     return [];
   }
@@ -1293,6 +1300,7 @@ function quebrarSegmentoPorTrocaDeSpeaker(textoFinal, janela) {
     frames.push({
       label: d1 < d2 ? 1 : 2,
       delta,
+      time: f.time,
       feature: f
     });
   }
@@ -1310,18 +1318,38 @@ function quebrarSegmentoPorTrocaDeSpeaker(textoFinal, janela) {
         label: atual.label,
         count: 1,
         deltaSum: atual.delta,
-        features: [atual.feature]
+        features: [atual.feature],
+        startTime: atual.time,
+        endTime: atual.time
       });
     } else {
       ultimo.count += 1;
       ultimo.deltaSum += atual.delta;
       ultimo.features.push(atual.feature);
+      ultimo.endTime = atual.time;
     }
   }
 
   const runsFiltrados = runs.filter((r) => r.count >= 3);
   if (runsFiltrados.length < 2) {
     return [];
+  }
+
+  for (let i = 1; i < runsFiltrados.length; i += 1) {
+    const anterior = runsFiltrados[i - 1];
+    const atual = runsFiltrados[i];
+    const gapMs = (atual.startTime || 0) - (anterior.endTime || 0);
+    if (gapMs > PAUSA_MAXIMA_TROCA_SPEAKER_MS) {
+      trace("subsegmento.skip_gap", {
+        gapMs,
+        anterior: anterior.label,
+        atual: atual.label
+      });
+      debug(
+        `troca ignorada por pausa de ${Math.round(gapMs)}ms entre speakers candidatos.`
+      );
+      return [];
+    }
   }
 
   const alternancia = runsFiltrados.some((r, i) => i > 0 && runsFiltrados[i - 1].label !== r.label);
