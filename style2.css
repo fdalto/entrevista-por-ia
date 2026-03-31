@@ -17,6 +17,8 @@
 
 body {
   margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
   font-family: "Trebuchet MS", "Segoe UI", sans-serif;
   color: var(--text);
   background:
@@ -30,6 +32,9 @@ body {
   margin: 0 auto;
   padding: 16px;
   display: grid;
+  min-height: 100vh;
+  min-height: 100dvh;
+  grid-template-rows: auto auto 1fr auto;
   gap: 12px;
 }
 
@@ -55,6 +60,12 @@ h2 {
   box-shadow: 0 8px 20px rgba(20, 32, 40, 0.08);
 }
 
+.card-resultado-final {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .buttons {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
@@ -65,12 +76,38 @@ h2 {
   margin-bottom: 8px;
 }
 
+.calibracao-buttons button {
+  background: #2f58b2;
+  position: relative;
+}
+
+.calibracao-buttons button:hover:not(:disabled) {
+  background: #02a0f6;
+}
+
+.calibracao-buttons button.calibrado::after {
+  content: "\2713";
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: #51e65d;
+  color: #eef1e1;
+  font-size: 0.90rem;
+  font-weight: 900;
+  box-shadow: 0 4px 6px rgba(234, 246, 122, 0.18);
+}
+
 .acao-buttons {
   margin-top: 8px;
 }
 
 .orientacao {
-  margin: 0;
+  margin: 10;
   color: var(--muted);
   font-weight: 600;
 }
@@ -96,7 +133,9 @@ button:active:not(:disabled) {
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: 1;
+  color: #f3f7f9;
+  background: #b9c5cb;
 }
 
 #btnFinalizar {
@@ -105,6 +144,19 @@ button:disabled {
 
 #btnFinalizar:hover:not(:disabled) {
   background: var(--danger-hover);
+}
+
+#btnFinalizar:disabled,
+#btnIniciar:disabled {
+  background: #b9c5cb;
+}
+
+.btn-modo {
+  background: #5d7682;
+}
+
+.btn-modo:hover:not(:disabled) {
+  background: #475c65;
 }
 
 .status {
@@ -125,9 +177,29 @@ button:disabled {
   margin: 0;
 }
 
+.resultado-acoes {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .resultado-header #btnEnviar {
   width: auto;
   min-width: 140px;
+  padding: 0 14px;
+}
+
+.resultado-acoes .btn-modo {
+  width: auto;
+  min-width: 140px;
+  min-height: 31px;
+  padding: 0 14px;
+}
+
+.debug-header .btn-modo {
+  min-height: 31px;
   padding: 0 14px;
 }
 
@@ -135,11 +207,31 @@ button:disabled {
   display: grid;
   grid-template-columns: 1fr;
   gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .resultado-coluna h3 {
   margin: 0 0 6px;
   font-size: 0.95rem;
+}
+
+.resultado-coluna {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.debug-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.debug-header h2 {
+  margin: 0;
 }
 
 .debug {
@@ -156,9 +248,59 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.prompt-editor {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.prompt-label {
+  font-weight: 700;
+}
+
+.prompt-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.prompt-textarea {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fbfeff;
+  color: var(--text);
+  font-family: "Courier New", monospace;
+  font-size: 0.92rem;
+}
+
+.prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.card-debug.is-collapsed h2 {
+  margin-bottom: 0;
+}
+
+.card-debug.is-collapsed .debug-header {
+  margin-bottom: 0;
+}
+
+.card-debug.is-collapsed .prompt-editor {
+  display: none !important;
+}
+
+.is-hidden {
+  display: none !important;
+}
+
 .resultado {
   min-height: 140px;
-  max-height: 360px;
+  height: 100%;
   overflow: auto;
   padding: 8px;
   border: 1px solid var(--border);
@@ -180,5 +322,9 @@ button:disabled {
 @media (min-width: 840px) {
   .resultado-grid {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .resultado-grid.modo-normal {
+    grid-template-columns: 1fr;
   }
 }

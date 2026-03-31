@@ -4,6 +4,7 @@ const JANELA_SEGMENTO_MS = 3000;
 const RETENCAO_TIMELINE_MS = 30000;
 const INTERIM_IDLE_FLUSH_MS = 1800;
 const PAUSA_MAXIMA_TROCA_SPEAKER_MS = 450;
+const NORMALIZAR_ESPACOS_TRANSCRICAO_FINAL = false;
 const CENTROID_MIN_HZ = 80;
 const CENTROID_MAX_HZ = 4000;
 const PESO_MINIMO_DINAMICO = 0.03;
@@ -14,16 +15,24 @@ const MAX_SOBREPOSICAO_CHARS = 320;
 const INTERIM_LOG_THROTTLE_MS = 700;
 const TRACE_LOG_THROTTLE_MS = 500;
 const FEATURE_KEYS = ["ch", "vol", "pit", "zcr", "cent"];
+const PROMPT_IA_STORAGE_KEY = "entrevista_prompt_ia_personalizado";
 
 const els = {
   btnCalibrarIndividuo1: document.getElementById("btnCalibrarIndividuo1"),
   btnCalibrarIndividuo2: document.getElementById("btnCalibrarIndividuo2"),
   btnIniciar: document.getElementById("btnIniciar"),
   btnFinalizar: document.getElementById("btnFinalizar"),
+  btnModoDebug: document.getElementById("btnModoDebug"),
   btnEnviar: document.getElementById("btnEnviar"),
   status: document.getElementById("status"),
+  cardDebug: document.getElementById("cardDebug"),
   debug: document.getElementById("debug"),
+  promptEditor: document.getElementById("promptEditor"),
+  campoPromptIA: document.getElementById("campoPromptIA"),
+  btnSalvarPromptIA: document.getElementById("btnSalvarPromptIA"),
+  resultadoGrid: document.getElementById("resultadoGrid"),
   resultadoSegmentos: document.getElementById("resultadoSegmentos"),
+  colunaTranscricaoFinal: document.getElementById("colunaTranscricaoFinal"),
   transcricaoFinal: document.getElementById("transcricaoFinal")
 };
 
@@ -59,6 +68,7 @@ const state = {
   calibracaoBuffer: [],
   segmentosMarcados: [],
   transcricaoFinalPartes: [],
+  modoDebugAtivo: false,
   interimAtual: "",
   ultimoInterimUpdateMs: 0,
   interimWatchdogTimer: null,
@@ -77,8 +87,13 @@ function boot() {
   els.btnCalibrarIndividuo2.addEventListener("click", () => calibrar("Individuo 2"));
   els.btnIniciar.addEventListener("click", iniciarEntrevista);
   els.btnFinalizar.addEventListener("click", finalizarEntrevista);
+  els.btnModoDebug.addEventListener("click", alternarModoDebug);
   els.btnEnviar.addEventListener("click", enviarParaIA);
+  els.btnSalvarPromptIA.addEventListener("click", salvarPromptIA);
   iniciarWatchdogInterim();
+  carregarPromptIA();
+  atualizarModoInterface();
+  atualizarEstadoControles();
   setStatus("Status: pronto para calibrar.");
   debug("Sistema iniciado.");
 }
@@ -86,6 +101,39 @@ function boot() {
 // Atualiza o texto de status principal na interface.
 function setStatus(texto) {
   els.status.textContent = texto;
+}
+
+// Alterna a interface entre modo normal e modo debug.
+function alternarModoDebug() {
+  state.modoDebugAtivo = !state.modoDebugAtivo;
+  atualizarModoInterface();
+  renderizarSegmentosMarcados();
+}
+
+// Aplica visibilidade e rotulos conforme o modo selecionado.
+function atualizarModoInterface() {
+  els.btnModoDebug.textContent = state.modoDebugAtivo ? "Ativar Modo Normal" : "Ativar Modo Debug";
+  els.cardDebug.classList.toggle("is-collapsed", !state.modoDebugAtivo);
+  els.debug.hidden = !state.modoDebugAtivo;
+  els.promptEditor.hidden = !state.modoDebugAtivo;
+  els.promptEditor.classList.toggle("is-hidden", !state.modoDebugAtivo);
+  els.colunaTranscricaoFinal.hidden = !state.modoDebugAtivo;
+  els.colunaTranscricaoFinal.classList.toggle("is-hidden", !state.modoDebugAtivo);
+  els.resultadoGrid.classList.toggle("modo-normal", !state.modoDebugAtivo);
+}
+
+// Retorna se as duas calibracoes necessarias ja foram concluidas.
+function calibracoesConcluidas() {
+  return !!state.assinaturaIndividuo1 && !!state.assinaturaIndividuo2;
+}
+
+// Atualiza o estado visual dos botoes de calibracao e entrevista.
+function atualizarEstadoControles() {
+  const prontoParaIniciar = calibracoesConcluidas() && !state.calibrando && !state.entrevistaAtiva;
+  els.btnIniciar.disabled = !prontoParaIniciar;
+  els.btnFinalizar.disabled = !state.entrevistaAtiva;
+  els.btnCalibrarIndividuo1.classList.toggle("calibrado", !!state.assinaturaIndividuo1);
+  els.btnCalibrarIndividuo2.classList.toggle("calibrado", !!state.assinaturaIndividuo2);
 }
 
 // Escreve mensagens no painel de debug com timestamp e limite de tamanho.
@@ -137,6 +185,116 @@ function formatTraceValue(v) {
 // Limita um valor numérico ao intervalo [min, max].
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
+}
+
+// Indica se um texto possui conteudo util, ignorando apenas espacos.
+function textoTemConteudo(texto) {
+  return typeof texto === "string" && texto.trim().length > 0;
+}
+
+// Prepara texto apenas para a coluna de transcricao final corrida.
+function prepararTextoTranscricaoFinal(texto) {
+  if (texto === null || texto === undefined) {
+    return "";
+  }
+  const valor = String(texto);
+  return NORMALIZAR_ESPACOS_TRANSCRICAO_FINAL ? valor.trim() : valor;
+}
+
+// Retorna o template padrao do prompt usado quando nao existe versao salva.
+function obterTemplatePromptPadrao() {
+  return `Voce recebera dois blocos de texto da mesma conversa.
+
+BLOCO 1 - TRANSCRICAO CORRIDA FINAL:
+Este bloco contem a transcricao corrida formada apenas pelos trechos finais reconhecidos pelo mecanismo de fala. Em geral, ele preserva melhor as palavras reconhecidas, mas nao identifica com seguranca quem falou cada trecho.
+
+BLOCO 2 - SEGMENTOS MARCADOS:
+Este bloco contem segmentos menores com tentativa automatica de identificar o interlocutor. Cada linha vem no formato:
+{spk=..., conf=..., delta=..., ch=..., vol=..., pit=..., zcr=..., cent=...} texto
+
+Interpretacao:
+
+* spk: sugestao automatica de speaker. Pode vir como nome, nome com interrogacao, ou apenas "?".
+* conf: confianca da classificacao local.
+* delta: diferenca de distancia entre os dois perfis calibrados. Quanto maior, mais forte a distincao.
+* ch: dominancia entre canais.
+* vol: volume medio.
+* pit: pitch aproximado.
+* zcr: zero-crossing rate.
+* cent: spectral centroid normalizado.
+* texto: trecho associado aquela marcacao.
+
+Sua tarefa:
+
+1. Reconstruir a conversa completa com pontuacao adequada e linguagem natural.
+2. Usar a TRANSCRICAO CORRIDA FINAL como base principal para preservar as palavras corretamente.
+3. Usar os SEGMENTOS MARCADOS como apoio para identificar quem falou cada trecho.
+4. Quando houver conflito entre os dois blocos, priorize o texto do BLOCO 1 e use o BLOCO 2 para orientar a atribuicao do interlocutor.
+5. Quando a identificacao do interlocutor estiver incerta, inferir pelo contexto conversacional, continuidade da fala, alternancia natural entre os participantes e pelas marcacoes disponiveis.
+6. Se ainda assim houver duvida real, mantenha o speaker como [Indefinido].
+7. Junte fragmentos curtos quebrados quando claramente fizerem parte da mesma frase.
+8. Corrija apenas pontuacao, capitalizacao e pequenas quebras de fluidez. Nao invente conteudo novo.
+
+Saida desejada:
+
+* Escreva a conversa em formato de dialogo.
+* Um speaker por linha, por exemplo:
+  [Vitor]: ...
+  [Bianca]: ...
+* Nao inclua explicacoes adicionais.
+* Entregue apenas a conversa final organizada.
+
+BLOCO 1 - TRANSCRICAO CORRIDA FINAL:
+{{TRANSCRICAO_FINAL}}
+
+BLOCO 2 - SEGMENTOS MARCADOS:
+{{SEGMENTOS_MARCADOS}}`;
+}
+
+// Carrega do navegador um prompt salvo anteriormente ou usa o padrao.
+function carregarPromptIA() {
+  let promptSalvo = "";
+  try {
+    promptSalvo = localStorage.getItem(PROMPT_IA_STORAGE_KEY) || "";
+  } catch (error) {
+    debug(`Nao foi possivel ler prompt salvo: ${error.message || String(error)}`);
+  }
+  els.campoPromptIA.value = textoTemConteudo(promptSalvo) ? promptSalvo : obterTemplatePromptPadrao();
+}
+
+// Salva o prompt atual no armazenamento local do navegador.
+function salvarPromptIA() {
+  const promptAtual = els.campoPromptIA.value || "";
+  try {
+    localStorage.setItem(PROMPT_IA_STORAGE_KEY, promptAtual);
+    setStatus("Status: prompt da IA salvo no navegador.");
+    debug("Prompt da IA salvo no navegador.");
+  } catch (error) {
+    setStatus("Status: nao foi possivel salvar o prompt da IA.");
+    debug(`Erro ao salvar prompt da IA: ${error.message || String(error)}`);
+  }
+}
+
+// Retorna o template ativo digitado pelo usuario ou o padrao de fallback.
+function obterTemplatePromptAtivo() {
+  const promptAtual = els.campoPromptIA.value || "";
+  return textoTemConteudo(promptAtual) ? promptAtual : obterTemplatePromptPadrao();
+}
+
+// Aplica os blocos da entrevista ao template editavel do prompt.
+function montarPromptComBlocos(template, transcricaoFinal, segmentosMarcados) {
+  const base = textoTemConteudo(template) ? template : obterTemplatePromptPadrao();
+  let promptFinal = base
+    .replaceAll("{{TRANSCRICAO_FINAL}}", transcricaoFinal)
+    .replaceAll("{{SEGMENTOS_MARCADOS}}", segmentosMarcados);
+
+  if (!base.includes("{{TRANSCRICAO_FINAL}}")) {
+    promptFinal += `\n\nBLOCO 1 - TRANSCRICAO CORRIDA FINAL:\n${transcricaoFinal}`;
+  }
+  if (!base.includes("{{SEGMENTOS_MARCADOS}}")) {
+    promptFinal += `\n\nBLOCO 2 - SEGMENTOS MARCADOS:\n${segmentosMarcados}`;
+  }
+  return promptFinal;
 }
 
 // Normaliza formatos de assinatura/feature para um vetor simples de features.
@@ -441,9 +599,10 @@ async function calibrar(nome) {
         const nomeExtraido = extrairNomeDaCalibracao(textoCalibracao);
         state.calibrando = null;
         state.calibracaoBuffer = [];
-        travarControles(false);
 
         if (!assinatura) {
+          travarControles(false);
+          atualizarEstadoControles();
           setStatus(`Status: falha na calibração de ${nome}. Tente novamente.`);
           debug(`Calibração de ${nome} sem dados suficientes.`);
           return;
@@ -469,6 +628,8 @@ async function calibrar(nome) {
         debug(`Assinatura ${rotuloAtual} desvios: ${formatFeatures(assinatura.desvios)}`);
         // Recalcula pesos somente após concluir/salvar a calibração atual.
         atualizarPesosAposCalibracao();
+        travarControles(false);
+        atualizarEstadoControles();
       } finally {
         await teardownAudioEngine();
       }
@@ -477,6 +638,7 @@ async function calibrar(nome) {
     state.calibrando = null;
     state.calibracaoBuffer = [];
     travarControles(false);
+    atualizarEstadoControles();
     setStatus("Status: erro ao acessar microfone para calibração.");
     debug(`Erro de calibração: ${error.message || String(error)}`);
   }
@@ -486,8 +648,7 @@ async function calibrar(nome) {
 function travarControles(calibrando) {
   els.btnCalibrarIndividuo1.disabled = calibrando;
   els.btnCalibrarIndividuo2.disabled = calibrando;
-  els.btnIniciar.disabled = calibrando || state.entrevistaAtiva;
-  els.btnFinalizar.disabled = !state.entrevistaAtiva;
+  atualizarEstadoControles();
 }
 
 // Calcula média simples das features para uma lista de frames.
@@ -707,8 +868,7 @@ async function iniciarEntrevista() {
 
     iniciarRecognition();
     state.entrevistaAtiva = true;
-    els.btnIniciar.disabled = true;
-    els.btnFinalizar.disabled = false;
+    atualizarEstadoControles();
     setStatus("Status: entrevista ativa (captura + transcrição contínua).");
     debug("Entrevista iniciada.");
   } catch (error) {
@@ -747,7 +907,8 @@ function iniciarRecognition() {
     }, "onresult");
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const resultado = event.results[i];
-      const texto = (resultado[0] && resultado[0].transcript ? resultado[0].transcript : "").trim();
+      const textoBruto = resultado[0] && resultado[0].transcript ? resultado[0].transcript : "";
+      const texto = textoBruto.trim();
       if (!texto) {
         continue;
       }
@@ -766,7 +927,7 @@ function iniciarRecognition() {
             trace("final.fecharSegmento.error", { erro: error.message || String(error) });
             marcarSegmentoIndefinido(texto);
           }
-          adicionarTrechoConsolidado(texto, "final");
+          adicionarTrechoConsolidado(prepararTextoTranscricaoFinal(textoBruto), "final");
           state.interimAtual = "";
           debug(`trecho final consolidado: ${texto}`);
           atualizarTranscricaoFinalUI();
@@ -777,8 +938,9 @@ function iniciarRecognition() {
           marcarSegmentoIndefinido(texto);
         }
       } else {
-        if (state.interimAtual !== texto) {
-          state.interimAtual = texto;
+        const textoInterim = prepararTextoTranscricaoFinal(textoBruto);
+        if (state.interimAtual !== textoInterim) {
+          state.interimAtual = textoInterim;
           state.ultimoInterimUpdateMs = Date.now();
           debug(`interim atualizado: ${texto}`);
           atualizarTranscricaoFinalUI();
@@ -895,12 +1057,29 @@ function classificarSegmento(features) {
 function appendSegmentoMarcado(seg) {
   const linha = document.createElement("div");
   linha.className = "linha-segmento";
-  linha.textContent =
-    `{spk=${seg.spk}, conf=${seg.conf.toFixed(2)}, delta=${seg.delta.toFixed(2)}, ` +
-    `ch=${seg.ch.toFixed(2)}, vol=${seg.vol.toFixed(2)}, pit=${seg.pit.toFixed(2)}, ` +
-    `zcr=${seg.zcr.toFixed(2)}, cent=${seg.cent.toFixed(2)}} ${seg.texto}`;
+  linha.textContent = formatarLinhaSegmento(seg);
   els.resultadoSegmentos.appendChild(linha);
   els.resultadoSegmentos.scrollTop = els.resultadoSegmentos.scrollHeight;
+}
+
+// Monta a linha de segmento conforme o modo visual ativo.
+function formatarLinhaSegmento(seg) {
+  if (!state.modoDebugAtivo) {
+    return `{${seg.spk}} ${seg.texto}`;
+  }
+  return (
+    `{spk=${seg.spk}, conf=${seg.conf.toFixed(2)}, delta=${seg.delta.toFixed(2)}, ` +
+    `ch=${seg.ch.toFixed(2)}, vol=${seg.vol.toFixed(2)}, pit=${seg.pit.toFixed(2)}, ` +
+    `zcr=${seg.zcr.toFixed(2)}, cent=${seg.cent.toFixed(2)}} ${seg.texto}`
+  );
+}
+
+// Re-renderiza os segmentos marcados quando o modo de visualizacao muda.
+function renderizarSegmentosMarcados() {
+  els.resultadoSegmentos.textContent = "";
+  for (let i = 0; i < state.segmentosMarcados.length; i += 1) {
+    appendSegmentoMarcado(state.segmentosMarcados[i]);
+  }
 }
 
 // Finaliza entrevista com flush de recognition/interim e teardown de áudio.
@@ -910,22 +1089,21 @@ async function finalizarEntrevista() {
   }
 
   state.entrevistaAtiva = false;
-  els.btnIniciar.disabled = true;
-  els.btnFinalizar.disabled = true;
+  atualizarEstadoControles();
 
   await aguardarParadaRecognition();
   flushInterimFinalSeNecessario();
 
   await teardownAudioEngine();
   state.recognitionRunning = false;
-  els.btnIniciar.disabled = false;
+  atualizarEstadoControles();
   setStatus("Status: entrevista finalizada.");
   debug("Entrevista finalizada e recursos liberados.");
 }
 
 // Monta prompt completo e copia para clipboard para uso em IA.
 async function enviarParaIA() {
-  const promptMontado = montarPromptParaIA();
+  const promptMontado = montarPromptParaIAEditavel();
   try {
     await copiarTextoParaClipboard(promptMontado);
     setStatus("Status: prompt para IA copiado para a área de transferência.");
@@ -940,9 +1118,9 @@ async function enviarParaIA() {
 // Atualiza coluna de transcrição corrida (consolidado + interim em processamento).
 function atualizarTranscricaoFinalUI() {
   const consolidado = obterTranscricaoFinalConsolidada();
-  const interim = (state.interimAtual || "").trim();
-  const textoVisivel = interim
-    ? `${consolidado}${consolidado ? "\n" : ""}[em processamento] ${interim}`
+  const interim = prepararTextoTranscricaoFinal(state.interimAtual || "");
+  const textoVisivel = textoTemConteudo(interim)
+    ? `${consolidado}${consolidado ? "\n\n" : ""}${interim}`
     : consolidado;
 
   els.transcricaoFinal.innerText = textoVisivel;
@@ -951,7 +1129,9 @@ function atualizarTranscricaoFinalUI() {
 
 // Retorna o texto consolidado final da transcrição corrida.
 function obterTranscricaoFinalConsolidada() {
-  return state.transcricaoFinalPartes.join(" ").trim();
+  return NORMALIZAR_ESPACOS_TRANSCRICAO_FINAL
+    ? state.transcricaoFinalPartes.join(" ").trim()
+    : state.transcricaoFinalPartes.join("");
 }
 
 // Aguarda parada do recognition com fallback por timeout curto.
@@ -996,8 +1176,8 @@ async function aguardarParadaRecognition() {
 // Faz flush do interim pendente para não perder fala no encerramento.
 function flushInterimFinalSeNecessario() {
   console.log("[diag] executando funcao flushInterimFinalSeNecessario");
-  const trecho = (state.interimAtual || "").trim();
-  if (!trecho) {
+  const trecho = prepararTextoTranscricaoFinal(state.interimAtual || "");
+  if (!textoTemConteudo(trecho)) {
     console.log("[ovl] flushInterim skip: vazio");
     trace("flushInterim.skip", { motivo: "interim_vazio" });
     return;
@@ -1045,8 +1225,8 @@ function iniciarWatchdogInterim() {
 // Consolida novo trecho na transcrição final com estratégia de merge por sobreposição.
 function adicionarTrechoConsolidado(texto, origem = "desconhecida") {
   console.log(`[diag] executando funcao adicionarTrechoConsolidado (${origem})`);
-  const trecho = (texto || "").trim();
-  if (!trecho) {
+  const trecho = prepararTextoTranscricaoFinal(texto);
+  if (!textoTemConteudo(trecho)) {
     console.log(`[ovl] consolidacao skip (${origem}): vazio`);
     trace("consolidacao.skip", { origem, motivo: "trecho_vazio" });
     return;
@@ -1064,6 +1244,14 @@ function adicionarTrechoConsolidado(texto, origem = "desconhecida") {
     debug(`trecho consolidado (${origem}): +${trecho.length} chars`);
     console.log(`[ovl] consolidacao first_insert (${origem})`);
     trace("consolidacao.first_insert", { origem, partesDepois: state.transcricaoFinalPartes.length });
+    return;
+  }
+
+  if (!NORMALIZAR_ESPACOS_TRANSCRICAO_FINAL) {
+    state.transcricaoFinalPartes.push(`\n\n${trecho}`);
+    debug(`trecho consolidado (${origem}) em nova parte sem normalizacao.`);
+    console.log(`[ovl] consolidacao append_raw (${origem})`);
+    trace("consolidacao.append_raw", { origem, partesDepois: state.transcricaoFinalPartes.length });
     return;
   }
 
@@ -1241,6 +1429,13 @@ ${segmentosMarcados}`;
 }
 
 // Copia texto para clipboard com fallback automático quando necessário.
+function montarPromptParaIAEditavel() {
+  const transcricaoFinal = obterTranscricaoFinalConsolidada();
+  const segmentosMarcados = (els.resultadoSegmentos.innerText || "").trim();
+  const templatePrompt = obterTemplatePromptAtivo();
+  return montarPromptComBlocos(templatePrompt, transcricaoFinal, segmentosMarcados);
+}
+
 async function copiarTextoParaClipboard(texto) {
   if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
     try {
