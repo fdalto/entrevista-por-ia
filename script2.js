@@ -1896,7 +1896,7 @@ function capturarTranscricaoCalibracao(duracaoMs) {
         return;
       }
       finalizado = true;
-      resolve(`${textoFinal} ${textoInterim}`.trim());
+      resolve(textoFinal.trim() || textoInterim.trim());
     };
 
     recognition.lang = "pt-BR";
