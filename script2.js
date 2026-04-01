@@ -90,6 +90,7 @@ function boot() {
   els.btnModoDebug.addEventListener("click", alternarModoDebug);
   els.btnEnviar.addEventListener("click", enviarParaIA);
   els.btnSalvarPromptIA.addEventListener("click", salvarPromptIA);
+  registrarListenersDiagnosticoPagina();
   iniciarWatchdogInterim();
   carregarPromptIA();
   atualizarModoInterface();
@@ -146,7 +147,7 @@ function debug(texto) {
     state.ultimoInterimLogMs = agora;
   }
   const linha = `[${new Date().toLocaleTimeString()}] ${texto}\n`;
-  els.debug.textContent = (els.debug.textContent + linha).slice(-8000);
+  els.debug.textContent = (els.debug.textContent + linha).slice(-20000);
   els.debug.scrollTop = els.debug.scrollHeight;
 }
 
@@ -180,6 +181,164 @@ function formatTraceValue(v) {
     return v.replace(/\s+/g, " ").slice(0, 180);
   }
   return String(v);
+}
+
+// Serializa erros/objetos para logs legiveis e compactos.
+function serializarErro(error) {
+  if (!error) {
+    return null;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  const payload = {};
+  if (error.name) {
+    payload.name = error.name;
+  }
+  if (error.message) {
+    payload.message = error.message;
+  }
+  if (error.error) {
+    payload.error = error.error;
+  }
+  if (error.constraint) {
+    payload.constraint = error.constraint;
+  }
+  if (error.type) {
+    payload.type = error.type;
+  }
+  if (error.timeStamp) {
+    payload.timeStamp = Math.round(error.timeStamp);
+  }
+  if (error.stack) {
+    payload.stack = String(error.stack).split("\n").slice(0, 2).join(" | ");
+  }
+  try {
+    const extras = Object.keys(error)
+      .slice(0, 8)
+      .reduce((acc, key) => {
+        if (payload[key] !== undefined) {
+          return acc;
+        }
+        const valor = error[key];
+        if (typeof valor === "function") {
+          return acc;
+        }
+        acc[key] = valor;
+        return acc;
+      }, {});
+    return JSON.stringify({ ...payload, ...extras });
+  } catch (jsonError) {
+    return payload.message || payload.name || String(error);
+  }
+}
+
+// Formata objetos pequenos de diagnostico para debug e console.
+function formatarDetalhesDiagnostico(dados) {
+  if (!dados || typeof dados !== "object") {
+    return "";
+  }
+  const partes = Object.entries(dados)
+    .filter(([, valor]) => valor !== undefined)
+    .map(([chave, valor]) => `${chave}=${formatTraceValue(valor)}`);
+  return partes.join(" | ");
+}
+
+// Emite log estruturado de diagnostico em debug + console.
+function registrarDiagnostico(etapa, dados = null) {
+  const detalhes = formatarDetalhesDiagnostico(dados);
+  debug(detalhes ? `[diag] ${etapa} | ${detalhes}` : `[diag] ${etapa}`);
+  trace(`diag.${etapa}`, dados);
+}
+
+// Coleta capacidades e contexto do navegador para comparacao entre devices.
+function coletarDiagnosticoAmbiente() {
+  const track = state.stream && typeof state.stream.getAudioTracks === "function"
+    ? state.stream.getAudioTracks()[0]
+    : null;
+  return {
+    secure: typeof window.isSecureContext === "boolean" ? window.isSecureContext : "desconhecido",
+    visibility: document.visibilityState || "desconhecido",
+    online: typeof navigator.onLine === "boolean" ? navigator.onLine : "desconhecido",
+    hasMediaDevices: !!navigator.mediaDevices,
+    hasGetUserMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+    hasSpeechRecognition: !!window.SpeechRecognition,
+    hasWebkitSpeechRecognition: !!window.webkitSpeechRecognition,
+    audioContextState: state.audioContext ? state.audioContext.state : "nenhum",
+    recognitionRunning: state.recognitionRunning,
+    entrevistaAtiva: state.entrevistaAtiva,
+    calibrando: state.calibrando || "",
+    trackReadyState: track ? track.readyState : "sem_track",
+    userAgent: (navigator.userAgent || "").slice(0, 160)
+  };
+}
+
+// Resume settings/constraints de uma faixa de audio quando disponiveis.
+function resumirTrackAudio(track) {
+  if (!track) {
+    return { existe: false };
+  }
+  let settings = null;
+  let constraints = null;
+  try {
+    settings = typeof track.getSettings === "function" ? track.getSettings() : null;
+  } catch (error) {
+    settings = { erro: serializarErro(error) };
+  }
+  try {
+    constraints = typeof track.getConstraints === "function" ? track.getConstraints() : null;
+  } catch (error) {
+    constraints = { erro: serializarErro(error) };
+  }
+  return {
+    existe: true,
+    label: track.label || "",
+    enabled: track.enabled,
+    muted: track.muted,
+    readyState: track.readyState,
+    settings: settings ? JSON.stringify(settings) : "",
+    constraints: constraints ? JSON.stringify(constraints) : ""
+  };
+}
+
+// Torna erros importantes visiveis na interface alem do painel debug.
+function registrarErroVisivel(contexto, error, statusPrefixo = "Status: erro detectado.") {
+  const detalhe = serializarErro(error) || "erro desconhecido";
+  window.setTimeout(() => {
+    setStatus(`${statusPrefixo} (${contexto}: ${detalhe})`);
+  }, 0);
+  registrarDiagnostico(`${contexto}.erro_visivel`, { detalhe });
+}
+
+// Registra eventos do SpeechRecognition em um formato consistente.
+function registrarEventoRecognition(origem, evento, extras = null) {
+  const dados = {
+    type: evento && evento.type ? evento.type : "",
+    error: evento && evento.error ? evento.error : "",
+    message: evento && evento.message ? evento.message : "",
+    timeStamp: evento && evento.timeStamp ? Math.round(evento.timeStamp) : "",
+    ...extras
+  };
+  registrarDiagnostico(`${origem}.${dados.type || "evento"}`, dados);
+}
+
+// Ajuda a entender interrupcoes comuns em mobile como perda de foco/rede.
+function registrarListenersDiagnosticoPagina() {
+  document.addEventListener("visibilitychange", () => {
+    registrarDiagnostico("page.visibilitychange", coletarDiagnosticoAmbiente());
+  });
+  window.addEventListener("pagehide", () => {
+    registrarDiagnostico("page.pagehide", coletarDiagnosticoAmbiente());
+  });
+  window.addEventListener("pageshow", () => {
+    registrarDiagnostico("page.pageshow", coletarDiagnosticoAmbiente());
+  });
+  window.addEventListener("online", () => {
+    registrarDiagnostico("network.online", coletarDiagnosticoAmbiente());
+  });
+  window.addEventListener("offline", () => {
+    registrarDiagnostico("network.offline", coletarDiagnosticoAmbiente());
+  });
 }
 
 // Limita um valor numérico ao intervalo [min, max].
@@ -325,19 +484,38 @@ function dist(a, b) {
 // Inicializa captura de áudio, nós WebAudio e buffers de análise.
 async function setupAudioEngine() {
   if (state.audioContext && state.stream && state.featureTimer) {
+    registrarDiagnostico("audio.setup.reuse", coletarDiagnosticoAmbiente());
     return;
   }
 
-  const stream = await navigator.mediaDevices.getUserMedia({
+  const constraints = {
     audio: {
       channelCount: 2,
       echoCancellation: false,
       noiseSuppression: false,
       autoGainControl: false
     }
+  };
+  registrarDiagnostico("audio.setup.start", {
+    ...coletarDiagnosticoAmbiente(),
+    constraints: JSON.stringify(constraints)
   });
 
+  const stream = await navigator.mediaDevices.getUserMedia(constraints).catch((error) => {
+    registrarDiagnostico("audio.setup.getusermedia.fail", {
+      ...coletarDiagnosticoAmbiente(),
+      erro: serializarErro(error)
+    });
+    throw error;
+  });
+  const track = typeof stream.getAudioTracks === "function" ? stream.getAudioTracks()[0] : null;
+  registrarDiagnostico("audio.setup.getusermedia.ok", resumirTrackAudio(track));
+
   const audioContext = new AudioContext();
+  registrarDiagnostico("audio.setup.context.created", {
+    state: audioContext.state,
+    sampleRate: audioContext.sampleRate
+  });
   const source = audioContext.createMediaStreamSource(stream);
   const splitter = audioContext.createChannelSplitter(2);
   const analyserL = audioContext.createAnalyser();
@@ -362,11 +540,17 @@ async function setupAudioEngine() {
   state.freqL = new Float32Array(analyserL.frequencyBinCount);
   state.freqR = new Float32Array(analyserR.frequencyBinCount);
   startFeatureLoop();
+  registrarDiagnostico("audio.setup.complete", {
+    audioContextState: audioContext.state,
+    fftSizeL: analyserL.fftSize,
+    fftSizeR: analyserR.fftSize
+  });
   debug("Captura de áudio inicializada.");
 }
 
 // Libera recursos de áudio e reseta referências de captura/análise.
 async function teardownAudioEngine() {
+  registrarDiagnostico("audio.teardown.start", coletarDiagnosticoAmbiente());
   stopFeatureLoop();
   if (state.stream) {
     state.stream.getTracks().forEach((track) => track.stop());
@@ -389,6 +573,7 @@ async function teardownAudioEngine() {
   state.freqL = null;
   state.freqR = null;
   state.featureTimer = null;
+  registrarDiagnostico("audio.teardown.complete", coletarDiagnosticoAmbiente());
 }
 
 // Inicia o loop periódico de extração de features.
@@ -571,6 +756,10 @@ function calcularSpectralCentroidNormalizado(analyserL, analyserR, sampleRate) {
 
 // Executa calibração de um participante (áudio + extração de nome + assinatura).
 async function calibrar(nome) {
+  registrarDiagnostico("calibracao.click", {
+    nome,
+    ...coletarDiagnosticoAmbiente()
+  });
   try {
     if (state.entrevistaAtiva) {
       setStatus("Status: finalize a entrevista antes de calibrar.");
@@ -582,6 +771,11 @@ async function calibrar(nome) {
     }
 
     await setupAudioEngine();
+    registrarDiagnostico("calibracao.audio_engine_pronta", coletarDiagnosticoAmbiente());
+    registrarDiagnostico("calibracao.audio_pronto", {
+      nome,
+      ...coletarDiagnosticoAmbiente()
+    });
     state.calibrando = nome;
     state.calibracaoBuffer = [];
     travarControles(true);
@@ -596,6 +790,13 @@ async function calibrar(nome) {
         const baseCalibracao = framesVoz.length >= 10 ? framesVoz : framesBrutos;
         const assinatura = mediaEdesvioFeatures(baseCalibracao);
         const textoCalibracao = await promessaTranscricao;
+        registrarDiagnostico("calibracao.transcricao_recebida", {
+          nome,
+          textoLen: textoCalibracao.length,
+          textoPreview: textoCalibracao.slice(0, 120),
+          framesBrutos: framesBrutos.length,
+          framesVoz: framesVoz.length
+        });
         const nomeExtraido = extrairNomeDaCalibracao(textoCalibracao);
         state.calibrando = null;
         state.calibracaoBuffer = [];
@@ -639,6 +840,7 @@ async function calibrar(nome) {
     state.calibracaoBuffer = [];
     travarControles(false);
     atualizarEstadoControles();
+    registrarErroVisivel("calibracao", error, "Status: erro na calibracao.");
     setStatus("Status: erro ao acessar microfone para calibração.");
     debug(`Erro de calibração: ${error.message || String(error)}`);
   }
@@ -843,6 +1045,7 @@ function formatFeatures(f) {
 
 // Inicia entrevista, limpa estados de saída e ativa reconhecimento contínuo.
 async function iniciarEntrevista() {
+  registrarDiagnostico("entrevista.click_iniciar", coletarDiagnosticoAmbiente());
   if (state.entrevistaAtiva) {
     return;
   }
@@ -852,6 +1055,7 @@ async function iniciarEntrevista() {
   }
   try {
     await setupAudioEngine();
+    registrarDiagnostico("entrevista.audio_pronto", coletarDiagnosticoAmbiente());
     state.timeline = [];
     state.segmentosMarcados = [];
     state.transcricaoFinalPartes = [];
@@ -866,6 +1070,7 @@ async function iniciarEntrevista() {
     els.resultadoSegmentos.textContent = "";
     atualizarTranscricaoFinalUI();
 
+    registrarDiagnostico("entrevista.recognition.inicio_solicitado", coletarDiagnosticoAmbiente());
     iniciarRecognition();
     state.entrevistaAtiva = true;
     atualizarEstadoControles();
@@ -874,12 +1079,17 @@ async function iniciarEntrevista() {
   } catch (error) {
     setStatus("Status: não foi possível iniciar a entrevista.");
     debug(`Erro ao iniciar entrevista: ${error.message || String(error)}`);
+    registrarErroVisivel("entrevista", error, "Status: falha ao iniciar a entrevista.");
   }
 }
 
 // Configura e inicia SpeechRecognition com tratamento de eventos.
 function iniciarRecognition() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  registrarDiagnostico("recognition.init.request", {
+    ...coletarDiagnosticoAmbiente(),
+    speechCtor: SpeechRecognition ? "ok" : "ausente"
+  });
   if (!SpeechRecognition) {
     throw new Error("Web Speech API não disponível no navegador.");
   }
@@ -899,6 +1109,37 @@ function iniciarRecognition() {
   recognition.lang = "pt-BR";
   recognition.continuous = true;
   recognition.interimResults = true;
+  registrarDiagnostico("recognition.init.created", {
+    lang: recognition.lang,
+    continuous: recognition.continuous,
+    interimResults: recognition.interimResults
+  });
+
+  recognition.onstart = (event) => {
+    state.recognitionRunning = true;
+    registrarEventoRecognition("recognition", event, coletarDiagnosticoAmbiente());
+  };
+  recognition.onaudiostart = (event) => {
+    registrarEventoRecognition("recognition", event, coletarDiagnosticoAmbiente());
+  };
+  recognition.onsoundstart = (event) => {
+    registrarEventoRecognition("recognition", event, coletarDiagnosticoAmbiente());
+  };
+  recognition.onspeechstart = (event) => {
+    registrarEventoRecognition("recognition", event, coletarDiagnosticoAmbiente());
+  };
+  recognition.onspeechend = (event) => {
+    registrarEventoRecognition("recognition", event, coletarDiagnosticoAmbiente());
+  };
+  recognition.onsoundend = (event) => {
+    registrarEventoRecognition("recognition", event, coletarDiagnosticoAmbiente());
+  };
+  recognition.onaudioend = (event) => {
+    registrarEventoRecognition("recognition", event, coletarDiagnosticoAmbiente());
+  };
+  recognition.onnomatch = (event) => {
+    registrarEventoRecognition("recognition", event, coletarDiagnosticoAmbiente());
+  };
 
   recognition.onresult = (event) => {
     trace("recognition.onresult", {
@@ -952,13 +1193,16 @@ function iniciarRecognition() {
   recognition.onerror = (event) => {
     trace("recognition.onerror", { error: event.error || "desconhecido" });
     debug(`SpeechRecognition erro: ${event.error || "desconhecido"}`);
+    registrarEventoRecognition("recognition", event, coletarDiagnosticoAmbiente());
+    registrarErroVisivel("speechrecognition", event, "Status: falha na transcricao.");
   };
 
-  recognition.onend = () => {
+  recognition.onend = (event) => {
     trace("recognition.onend", {
       entrevistaAtiva: state.entrevistaAtiva,
       aguardandoFlushFinal: state.aguardandoFlushFinal
     });
+    registrarEventoRecognition("recognition", event, coletarDiagnosticoAmbiente());
     state.recognitionRunning = false;
     if (state.aguardandoFlushFinal && state.finalizarRecognitionResolve) {
       const resolve = state.finalizarRecognitionResolve;
@@ -973,19 +1217,29 @@ function iniciarRecognition() {
     }
     if (state.entrevistaAtiva) {
       try {
+        registrarDiagnostico("recognition.restart.request", coletarDiagnosticoAmbiente());
         recognition.start();
         state.recognitionRunning = true;
         trace("recognition.restart.ok");
+        registrarDiagnostico("recognition.restart.ok", coletarDiagnosticoAmbiente());
       } catch (e) {
         trace("recognition.restart.fail", { erro: e.message || String(e) });
         debug(`Falha ao reiniciar recognition: ${e.message || String(e)}`);
+        registrarErroVisivel("speechrecognition-restart", e, "Status: falha ao reiniciar a transcricao.");
       }
     }
   };
 
-  recognition.start();
-  state.recognition = recognition;
-  state.recognitionRunning = true;
+  registrarDiagnostico("recognition.start.request", coletarDiagnosticoAmbiente());
+  try {
+    recognition.start();
+    state.recognition = recognition;
+    state.recognitionRunning = true;
+    registrarDiagnostico("recognition.start.ok", coletarDiagnosticoAmbiente());
+  } catch (error) {
+    registrarErroVisivel("speechrecognition-start", error, "Status: falha ao iniciar a transcricao.");
+    throw error;
+  }
 }
 
 // Gera segmento classificado a partir de texto final e janela acústica recente.
@@ -1088,6 +1342,7 @@ async function finalizarEntrevista() {
     return;
   }
 
+  registrarDiagnostico("entrevista.finalizar.request", coletarDiagnosticoAmbiente());
   state.entrevistaAtiva = false;
   atualizarEstadoControles();
 
@@ -1099,6 +1354,7 @@ async function finalizarEntrevista() {
   atualizarEstadoControles();
   setStatus("Status: entrevista finalizada.");
   debug("Entrevista finalizada e recursos liberados.");
+  registrarDiagnostico("entrevista.finalizar.complete", coletarDiagnosticoAmbiente());
 }
 
 // Monta prompt completo e copia para clipboard para uso em IA.
@@ -1137,9 +1393,11 @@ function obterTranscricaoFinalConsolidada() {
 // Aguarda parada do recognition com fallback por timeout curto.
 async function aguardarParadaRecognition() {
   if (!state.recognition || !state.recognitionRunning) {
+    registrarDiagnostico("recognition.stop.skip", coletarDiagnosticoAmbiente());
     return;
   }
 
+  registrarDiagnostico("recognition.stop.request", coletarDiagnosticoAmbiente());
   state.aguardandoFlushFinal = true;
   await new Promise((resolve) => {
     let resolvido = false;
@@ -1161,6 +1419,7 @@ async function aguardarParadaRecognition() {
     state.finalizarRecognitionResolve = concluir;
     state.finalizarRecognitionTimer = window.setTimeout(() => {
       debug("timeout aguardando onend do recognition para flush final.");
+      registrarDiagnostico("recognition.stop.timeout", coletarDiagnosticoAmbiente());
       concluir();
     }, 1000);
 
@@ -1168,6 +1427,7 @@ async function aguardarParadaRecognition() {
       state.recognition.stop();
     } catch (e) {
       debug(`Aviso ao parar recognition: ${e.message || String(e)}`);
+      registrarErroVisivel("speechrecognition-stop", e, "Status: falha ao parar a transcricao.");
       concluir();
     }
   });
@@ -1597,6 +1857,11 @@ function quebrarSegmentoPorTrocaDeSpeaker(textoFinal, janela) {
 // Captura transcrição curta durante calibração para extrair nome falado.
 function capturarTranscricaoCalibracao(duracaoMs) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  registrarDiagnostico("calibracao.recognition.request", {
+    duracaoMs,
+    ...coletarDiagnosticoAmbiente(),
+    speechCtor: SpeechRecognition ? "ok" : "ausente"
+  });
   if (!SpeechRecognition) {
     debug("Web Speech API indisponível para extrair nome na calibração.");
     return Promise.resolve("");
@@ -1619,8 +1884,42 @@ function capturarTranscricaoCalibracao(duracaoMs) {
     recognition.lang = "pt-BR";
     recognition.continuous = true;
     recognition.interimResults = true;
+    registrarDiagnostico("calibracao.recognition.created", {
+      lang: recognition.lang,
+      continuous: recognition.continuous,
+      interimResults: recognition.interimResults
+    });
+
+    recognition.onstart = (event) => {
+      registrarEventoRecognition("calibracao.recognition", event, coletarDiagnosticoAmbiente());
+    };
+    recognition.onaudiostart = (event) => {
+      registrarEventoRecognition("calibracao.recognition", event, coletarDiagnosticoAmbiente());
+    };
+    recognition.onsoundstart = (event) => {
+      registrarEventoRecognition("calibracao.recognition", event, coletarDiagnosticoAmbiente());
+    };
+    recognition.onspeechstart = (event) => {
+      registrarEventoRecognition("calibracao.recognition", event, coletarDiagnosticoAmbiente());
+    };
+    recognition.onspeechend = (event) => {
+      registrarEventoRecognition("calibracao.recognition", event, coletarDiagnosticoAmbiente());
+    };
+    recognition.onsoundend = (event) => {
+      registrarEventoRecognition("calibracao.recognition", event, coletarDiagnosticoAmbiente());
+    };
+    recognition.onaudioend = (event) => {
+      registrarEventoRecognition("calibracao.recognition", event, coletarDiagnosticoAmbiente());
+    };
+    recognition.onnomatch = (event) => {
+      registrarEventoRecognition("calibracao.recognition", event, coletarDiagnosticoAmbiente());
+    };
 
     recognition.onresult = (event) => {
+      registrarDiagnostico("calibracao.recognition.result", {
+        resultIndex: event.resultIndex,
+        total: event.results.length
+      });
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const resultado = event.results[i];
         const texto = (resultado[0] && resultado[0].transcript ? resultado[0].transcript : "").trim();
@@ -1636,17 +1935,23 @@ function capturarTranscricaoCalibracao(duracaoMs) {
       }
     };
 
-    recognition.onerror = () => {
+    recognition.onerror = (event) => {
+      registrarEventoRecognition("calibracao.recognition", event, coletarDiagnosticoAmbiente());
+      registrarErroVisivel("calibracao-transcricao", event, "Status: falha na transcricao da calibracao.");
       finalizar();
     };
 
-    recognition.onend = () => {
+    recognition.onend = (event) => {
+      registrarEventoRecognition("calibracao.recognition", event, coletarDiagnosticoAmbiente());
       finalizar();
     };
 
     try {
+      registrarDiagnostico("calibracao.recognition.start.request", coletarDiagnosticoAmbiente());
       recognition.start();
+      registrarDiagnostico("calibracao.recognition.start.ok", coletarDiagnosticoAmbiente());
     } catch (error) {
+      registrarErroVisivel("calibracao-transcricao-start", error, "Status: falha ao iniciar a transcricao da calibracao.");
       debug(`Falha ao iniciar SpeechRecognition na calibração: ${error.message || String(error)}`);
       finalizar();
       return;
@@ -1654,8 +1959,10 @@ function capturarTranscricaoCalibracao(duracaoMs) {
 
     window.setTimeout(() => {
       try {
+        registrarDiagnostico("calibracao.recognition.stop.request", coletarDiagnosticoAmbiente());
         recognition.stop();
       } catch (error) {
+        registrarErroVisivel("calibracao-transcricao-stop", error, "Status: falha ao parar a transcricao da calibracao.");
         debug(`Falha ao parar SpeechRecognition na calibração: ${error.message || String(error)}`);
         finalizar();
       }
