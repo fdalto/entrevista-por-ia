@@ -770,71 +770,87 @@ async function calibrar(nome) {
       return;
     }
 
+    travarControles(true);
+    state.calibrando = nome;
+    state.calibracaoBuffer = [];
+
+    setStatus(`Status: etapa 1/2 - capturando o nome falado de ${nome}...`);
+    debug(`Calibracao de ${nome} iniciada (etapa 1: transcricao do nome).`);
+    registrarDiagnostico("calibracao.etapa1.start", {
+      nome,
+      duracaoMs: CALIBRACAO_MS
+    });
+    const textoCalibracao = await capturarTranscricaoCalibracao(CALIBRACAO_MS);
+    registrarDiagnostico("calibracao.transcricao_recebida", {
+      nome,
+      textoLen: textoCalibracao.length,
+      textoPreview: textoCalibracao.slice(0, 120)
+    });
+    const nomeExtraido = extrairNomeDaCalibracao(textoCalibracao);
+
+    setStatus(`Status: etapa 2/2 - coletando assinatura acustica de ${nome} por 4 segundos...`);
+    debug(`Calibracao de ${nome} seguindo para etapa 2: assinatura acustica.`);
+    registrarDiagnostico("calibracao.etapa2.start", {
+      nome,
+      duracaoMs: CALIBRACAO_MS
+    });
+
     await setupAudioEngine();
     registrarDiagnostico("calibracao.audio_engine_pronta", coletarDiagnosticoAmbiente());
     registrarDiagnostico("calibracao.audio_pronto", {
       nome,
       ...coletarDiagnosticoAmbiente()
     });
-    state.calibrando = nome;
     state.calibracaoBuffer = [];
-    travarControles(true);
-    setStatus(`Status: calibrando ${nome} por 4 segundos...`);
-    debug(`Calibração de ${nome} iniciada.`);
-    const promessaTranscricao = capturarTranscricaoCalibracao(CALIBRACAO_MS);
 
-    window.setTimeout(async () => {
-      try {
-        const framesBrutos = state.calibracaoBuffer.slice();
-        const framesVoz = filtrarFramesCalibracao(framesBrutos);
-        const baseCalibracao = framesVoz.length >= 10 ? framesVoz : framesBrutos;
-        const assinatura = mediaEdesvioFeatures(baseCalibracao);
-        const textoCalibracao = await promessaTranscricao;
-        registrarDiagnostico("calibracao.transcricao_recebida", {
-          nome,
-          textoLen: textoCalibracao.length,
-          textoPreview: textoCalibracao.slice(0, 120),
-          framesBrutos: framesBrutos.length,
-          framesVoz: framesVoz.length
-        });
-        const nomeExtraido = extrairNomeDaCalibracao(textoCalibracao);
-        state.calibrando = null;
-        state.calibracaoBuffer = [];
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, CALIBRACAO_MS);
+    });
 
-        if (!assinatura) {
-          travarControles(false);
-          atualizarEstadoControles();
-          setStatus(`Status: falha na calibração de ${nome}. Tente novamente.`);
-          debug(`Calibração de ${nome} sem dados suficientes.`);
-          return;
-        }
+    const framesBrutos = state.calibracaoBuffer.slice();
+    const framesVoz = filtrarFramesCalibracao(framesBrutos);
+    const baseCalibracao = framesVoz.length >= 10 ? framesVoz : framesBrutos;
+    const assinatura = mediaEdesvioFeatures(baseCalibracao);
+    registrarDiagnostico("calibracao.audio_amostras", {
+      nome,
+      framesBrutos: framesBrutos.length,
+      framesVoz: framesVoz.length,
+      framesUsados: baseCalibracao.length
+    });
 
-        if (nome === "Individuo 1") {
-          state.assinaturaIndividuo1 = assinatura;
-          if (nomeExtraido) {
-            state.nomeIndividuo1 = nomeExtraido;
-          }
-        } else {
-          state.assinaturaIndividuo2 = assinatura;
-          if (nomeExtraido) {
-            state.nomeIndividuo2 = nomeExtraido;
-          }
-        }
+    state.calibrando = null;
+    state.calibracaoBuffer = [];
 
-        const rotuloAtual = nome === "Individuo 1" ? state.nomeIndividuo1 : state.nomeIndividuo2;
-        setStatus(`Status: calibração de ${nome} concluída (${rotuloAtual}).`);
-        debug(`Fala calibração ${nome}: "${textoCalibracao || "sem transcrição"}"`);
-        debug(`Frames calibração ${nome}: brutos=${framesBrutos.length}, voz=${framesVoz.length}, usados=${baseCalibracao.length}`);
-        debug(`Assinatura ${rotuloAtual} medias: ${formatFeatures(assinatura.medias)}`);
-        debug(`Assinatura ${rotuloAtual} desvios: ${formatFeatures(assinatura.desvios)}`);
-        // Recalcula pesos somente após concluir/salvar a calibração atual.
-        atualizarPesosAposCalibracao();
-        travarControles(false);
-        atualizarEstadoControles();
-      } finally {
-        await teardownAudioEngine();
+    if (!assinatura) {
+      travarControles(false);
+      atualizarEstadoControles();
+      setStatus(`Status: falha na calibração de ${nome}. Tente novamente.`);
+      debug(`Calibracao de ${nome} sem dados suficientes.`);
+      return;
+    }
+
+    if (nome === "Individuo 1") {
+      state.assinaturaIndividuo1 = assinatura;
+      if (nomeExtraido) {
+        state.nomeIndividuo1 = nomeExtraido;
       }
-    }, CALIBRACAO_MS);
+    } else {
+      state.assinaturaIndividuo2 = assinatura;
+      if (nomeExtraido) {
+        state.nomeIndividuo2 = nomeExtraido;
+      }
+    }
+
+    const rotuloAtual = nome === "Individuo 1" ? state.nomeIndividuo1 : state.nomeIndividuo2;
+    setStatus(`Status: calibração de ${nome} concluída (${rotuloAtual}).`);
+    debug(`Fala calibracao ${nome}: "${textoCalibracao || "sem transcricao"}"`);
+    debug(`Frames calibracao ${nome}: brutos=${framesBrutos.length}, voz=${framesVoz.length}, usados=${baseCalibracao.length}`);
+    debug(`Assinatura ${rotuloAtual} medias: ${formatFeatures(assinatura.medias)}`);
+    debug(`Assinatura ${rotuloAtual} desvios: ${formatFeatures(assinatura.desvios)}`);
+    // Recalcula pesos somente após concluir/salvar a calibração atual.
+    atualizarPesosAposCalibracao();
+    travarControles(false);
+    atualizarEstadoControles();
   } catch (error) {
     state.calibrando = null;
     state.calibracaoBuffer = [];
@@ -843,6 +859,8 @@ async function calibrar(nome) {
     registrarErroVisivel("calibracao", error, "Status: erro na calibracao.");
     setStatus("Status: erro ao acessar microfone para calibração.");
     debug(`Erro de calibração: ${error.message || String(error)}`);
+  } finally {
+    await teardownAudioEngine();
   }
 }
 
