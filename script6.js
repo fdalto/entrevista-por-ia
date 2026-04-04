@@ -88,6 +88,7 @@ const state = {
   aguardandoFlushFinal: false,
   finalizarRecognitionResolve: null,
   finalizarRecognitionTimer: null,
+  sessaoEntrevista: null,
   cortesCandidatos: [],
   ultimoLabelInterim: null,
   confirmacoesTrocaInterim: 0,
@@ -345,12 +346,13 @@ async function setupAudioEngine(opcoes = {}) {
     return;
   }
   const forCalibration = !!opcoes.forCalibration;
+  const streamExterno = opcoes.stream || null;
   const audioConstraints = forCalibration
     ? {
       channelCount: 2,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false
     }
     : {
       channelCount: 2,
@@ -359,14 +361,29 @@ async function setupAudioEngine(opcoes = {}) {
       autoGainControl: false
     };
   if (forCalibration) {
-    debug("Calibração: solicitando captura com noiseSuppression=true, echoCancellation=true e autoGainControl=true.");
+    debug("Calibracao: preparando captura de calibracao.");
   }
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: audioConstraints
-  });
+  let stream = streamExterno;
+  if (!stream) {
+    if (forCalibration) {
+      debug("Calibracao: solicitando captura com noiseSuppression=false, echoCancellation=false e autoGainControl=false.");
+    }
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: audioConstraints
+    });
+  } else if (forCalibration) {
+    debug("Calibracao: usando stream compartilhado para assinatura acustica.");
+  }
 
   const audioContext = new AudioContext();
+  if (audioContext.state === "suspended") {
+    try {
+      await audioContext.resume();
+    } catch (error) {
+      debug(`Aviso ao retomar AudioContext: ${error.message || String(error)}`);
+    }
+  }
   const source = audioContext.createMediaStreamSource(stream);
   const splitter = audioContext.createChannelSplitter(2);
   const analyserL = audioContext.createAnalyser();
@@ -391,7 +408,7 @@ async function setupAudioEngine(opcoes = {}) {
   state.freqL = new Float32Array(analyserL.frequencyBinCount);
   state.freqR = new Float32Array(analyserR.frequencyBinCount);
   startFeatureLoop();
-  debug(forCalibration ? "Calibração: captura iniciada com perfil de redução de ruído." : "Captura de áudio inicializada.");
+  debug(forCalibration ? "Calibracao: captura acustica iniciada." : "Captura de áudio inicializada.");
 }
 
 // Libera recursos de áudio e reseta referências de captura/análise.
@@ -599,9 +616,58 @@ function calcularSpectralCentroidNormalizado(analyserL, analyserR, sampleRate) {
 }
 
 // Executa calibração em duas etapas sequenciais: primeiro voz/nome, depois assinatura acústica.
+function criarSessaoAudioCompartilhada() {
+  return navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 2,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false
+    }
+  }).then((rawStream) => {
+    const rawTrack = rawStream.getAudioTracks()[0] || null;
+    if (!rawTrack) {
+      rawStream.getTracks().forEach((track) => track.stop());
+      throw new Error("Nenhuma trilha de audio disponivel para calibracao.");
+    }
+
+    const analysisTrack = rawTrack.clone();
+    const sttTrack = rawTrack.clone();
+    const analysisStream = new MediaStream([analysisTrack]);
+
+    const cleanup = () => {
+      try {
+        analysisStream.getTracks().forEach((track) => track.stop());
+      } catch (e) {
+        // noop
+      }
+      try {
+        sttTrack.stop();
+      } catch (e) {
+        // noop
+      }
+      try {
+        rawStream.getTracks().forEach((track) => track.stop());
+      } catch (e) {
+        // noop
+      }
+    };
+
+    return {
+      analysisStream,
+      sttTrack,
+      cleanup
+    };
+  });
+}
+
+// Executa calibracao com uma unica captura e trilhas clonadas para analise/STT.
 async function calibrar(nome) {
   let audioCalibracaoAtivo = false;
   let calibracaoConcluida = false;
+  let sessaoCompartilhada = null;
+  let textoCalibracao = "";
+  let nomeExtraido = "";
   try {
     if (state.entrevistaAtiva) {
       setStatus("Status: finalize a entrevista antes de calibrar.");
@@ -615,24 +681,29 @@ async function calibrar(nome) {
     travarControles(true);
     debug(`Calibração de ${nome} iniciada.`);
 
-    // Etapa 1: captura do nome via reconhecimento, sem motor acústico ativo.
-    setStatus(`Status: capturando nome do ${nome}...`);
-    const textoCalibracao = await capturarTranscricaoCalibracao(CALIBRACAO_MS);
-    const nomeExtraido = extrairNomeDaCalibracao(textoCalibracao);
-    if (!nomeExtraido) {
-      setStatus("Status: nome não identificado na calibração; usando rótulo padrão.");
-      debug("Nome não identificado na calibração; usando rótulo padrão.");
-    }
-
-    // Etapa 2: captura acústica para assinatura.
-    setStatus(`Status: capturando assinatura acústica do ${nome}...`);
-    await setupAudioEngine({ forCalibration: true });
+    // Captura conjunta para reconhecimento e assinatura acustica.
+    setStatus(`Status: capturando nome e assinatura acustica do ${nome}...`);
+    sessaoCompartilhada = await criarSessaoAudioCompartilhada();
+    debug("Calibracao: stream compartilhado criado (raw + clones para analise/STT).");
+    const promessaTranscricao = capturarTranscricaoCalibracao(CALIBRACAO_MS, {
+      track: sessaoCompartilhada.sttTrack
+    });
+    await setupAudioEngine({
+      forCalibration: true,
+      stream: sessaoCompartilhada.analysisStream
+    });
     audioCalibracaoAtivo = true;
     state.calibrando = nome;
     state.calibracaoBuffer = [];
     await new Promise((resolve) => {
       window.setTimeout(resolve, CALIBRACAO_MS);
     });
+    textoCalibracao = await promessaTranscricao;
+    nomeExtraido = extrairNomeDaCalibracao(textoCalibracao);
+    if (!nomeExtraido) {
+      setStatus("Status: nome nao identificado na calibracao; usando rotulo padrao.");
+      debug("Nome nao identificado na calibracao; usando rotulo padrao.");
+    }
 
     const framesBrutos = state.calibracaoBuffer.slice();
     const diagnosticoFrames = classificarFramesCalibracao(framesBrutos);
@@ -684,6 +755,14 @@ async function calibrar(nome) {
           ? "Recursos de áudio da calibração liberados."
           : "Recursos de áudio da calibração liberados após falha."
       );
+    }
+    if (sessaoCompartilhada) {
+      try {
+        sessaoCompartilhada.cleanup();
+        debug("Calibracao: stream compartilhado encerrado.");
+      } catch (e) {
+        debug(`Aviso ao encerrar stream compartilhado: ${e.message || String(e)}`);
+      }
     }
     state.calibrando = null;
     state.calibracaoBuffer = [];
@@ -973,8 +1052,14 @@ async function iniciarEntrevista() {
     setStatus("Status: calibre Individuo 1 e Individuo 2 antes de iniciar.");
     return;
   }
+  let sessaoEntrevista = null;
   try {
-    await setupAudioEngine();
+    sessaoEntrevista = await criarSessaoAudioCompartilhada();
+    state.sessaoEntrevista = sessaoEntrevista;
+    debug("Entrevista: stream compartilhado criado (raw + clones para analise/STT).");
+    await setupAudioEngine({
+      stream: sessaoEntrevista.analysisStream
+    });
     state.timeline = [];
     state.segmentosMarcados = [];
     state.transcricaoFinalPartes = [];
@@ -996,11 +1081,22 @@ async function iniciarEntrevista() {
     atualizarTranscricaoFinalUI();
 
     try {
-      iniciarRecognition();
+      iniciarRecognition({
+        track: sessaoEntrevista.sttTrack
+      });
     } catch (errorRecognition) {
       setStatus("Status: não foi possível iniciar a transcrição da entrevista.");
       debug(`Erro ao iniciar SpeechRecognition da entrevista: ${errorRecognition.message || String(errorRecognition)}`);
       await teardownAudioEngine();
+      if (sessaoEntrevista) {
+        try {
+          sessaoEntrevista.cleanup();
+          debug("Entrevista: stream compartilhado encerrado apos falha ao iniciar recognition.");
+        } catch (e) {
+          debug(`Aviso ao encerrar stream compartilhado da entrevista: ${e.message || String(e)}`);
+        }
+      }
+      state.sessaoEntrevista = null;
       return;
     }
 
@@ -1009,17 +1105,27 @@ async function iniciarEntrevista() {
     setStatus("Status: entrevista ativa (captura + transcrição contínua).");
     debug("Entrevista iniciada.");
   } catch (error) {
+    if (sessaoEntrevista) {
+      try {
+        sessaoEntrevista.cleanup();
+        debug("Entrevista: stream compartilhado encerrado apos falha de inicializacao.");
+      } catch (e) {
+        debug(`Aviso ao encerrar stream compartilhado da entrevista: ${e.message || String(e)}`);
+      }
+    }
+    state.sessaoEntrevista = null;
     setStatus("Status: não foi possível iniciar a entrevista.");
     debug(`Erro ao iniciar entrevista: ${error.message || String(error)}`);
   }
 }
 
 // Configura e inicia SpeechRecognition com tratamento de eventos.
-function iniciarRecognition() {
+function iniciarRecognition(opcoes = {}) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
     throw new Error("Web Speech API não disponível no navegador.");
   }
+  const track = opcoes.track || null;
 
   if (state.recognition) {
     try {
@@ -1115,7 +1221,16 @@ function iniciarRecognition() {
     }
     if (state.entrevistaAtiva) {
       try {
-        recognition.start();
+        if (track) {
+          try {
+            recognition.start(track);
+          } catch (errorTrack) {
+            debug(`SpeechRecognition entrevista: restart(track) indisponivel, fallback restart(). Motivo: ${errorTrack.message || String(errorTrack)}`);
+            recognition.start();
+          }
+        } else {
+          recognition.start();
+        }
         state.recognitionRunning = true;
         debug("SpeechRecognition entrevista: restart");
         trace("recognition.restart.ok");
@@ -1128,8 +1243,19 @@ function iniciarRecognition() {
   };
 
   try {
-    recognition.start();
-    debug("SpeechRecognition entrevista: start");
+    if (track) {
+      try {
+        recognition.start(track);
+        debug("SpeechRecognition entrevista: start(track)");
+      } catch (errorTrack) {
+        debug(`SpeechRecognition entrevista: start(track) indisponivel, fallback start(). Motivo: ${errorTrack.message || String(errorTrack)}`);
+        recognition.start();
+        debug("SpeechRecognition entrevista: start");
+      }
+    } else {
+      recognition.start();
+      debug("SpeechRecognition entrevista: start");
+    }
     trace("recognition.start.ok");
   } catch (error) {
     setStatus("Status: não foi possível iniciar reconhecimento de fala.");
@@ -1485,6 +1611,15 @@ async function finalizarEntrevista() {
   flushInterimFinalSeNecessario();
 
   await teardownAudioEngine();
+  if (state.sessaoEntrevista) {
+    try {
+      state.sessaoEntrevista.cleanup();
+      debug("Entrevista: stream compartilhado encerrado.");
+    } catch (e) {
+      debug(`Aviso ao encerrar stream compartilhado da entrevista: ${e.message || String(e)}`);
+    }
+  }
+  state.sessaoEntrevista = null;
   state.recognitionRunning = false;
   atualizarEstadoControles();
   setStatus("Status: entrevista finalizada.");
@@ -1980,7 +2115,7 @@ function quebrarSegmentoPorTrocaDeSpeaker(textoFinal, janela) {
 }
 
 // Captura transcrição curta durante calibração para extrair nome falado.
-function capturarTranscricaoCalibracao(duracaoMs) {
+function capturarTranscricaoCalibracaoLegacy(duracaoMs, opcoes = {}) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
     debug("Web Speech API indisponível para extrair nome na calibração.");
@@ -2143,6 +2278,105 @@ function capturarTranscricaoCalibracao(duracaoMs) {
       }
       window.setTimeout(() => {
         finalizeErrorSafe();
+      }, 350);
+    }, duracaoMs);
+  });
+}
+
+function capturarTranscricaoCalibracao(duracaoMs, opcoes = {}) {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    debug("Web Speech API indisponivel para extrair nome na calibracao.");
+    return Promise.resolve("");
+  }
+
+  return new Promise((resolve) => {
+    const recognition = new SpeechRecognition();
+    const track = opcoes.track || null;
+    let textoFinal = "";
+    let textoInterim = "";
+    let finalizado = false;
+    let timeoutStopTimer = null;
+
+    const finalizar = () => {
+      if (finalizado) {
+        return;
+      }
+      finalizado = true;
+      if (timeoutStopTimer) {
+        window.clearTimeout(timeoutStopTimer);
+        timeoutStopTimer = null;
+      }
+      resolve(`${textoFinal} ${textoInterim}`.trim());
+    };
+
+    recognition.lang = "pt-BR";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const resultado = event.results[i];
+        const texto = (resultado[0] && resultado[0].transcript ? resultado[0].transcript : "").trim();
+        if (!texto) {
+          continue;
+        }
+        if (resultado.isFinal) {
+          textoFinal = `${textoFinal} ${texto}`.trim();
+          textoInterim = "";
+        } else {
+          textoInterim = texto;
+        }
+      }
+    };
+
+    recognition.onerror = (event) => {
+      const erro = event && event.error ? event.error : "desconhecido";
+      debug(`SpeechRecognition calibracao erro: ${erro}`);
+      setStatus(`Status: erro na calibracao por voz: ${erro}`);
+      finalizar();
+    };
+
+    recognition.onend = () => {
+      debug("SpeechRecognition calibracao: end");
+      finalizar();
+    };
+
+    const iniciarRecognition = () => {
+      try {
+        if (track) {
+          try {
+            recognition.start(track);
+            debug("SpeechRecognition calibracao: start(track)");
+            return true;
+          } catch (errorTrack) {
+            debug(`SpeechRecognition calibracao: start(track) indisponivel, fallback start(). Motivo: ${errorTrack.message || String(errorTrack)}`);
+          }
+        }
+        recognition.start();
+        debug("SpeechRecognition calibracao: start");
+        return true;
+      } catch (error) {
+        debug(`Falha ao iniciar SpeechRecognition na calibracao: ${error.message || String(error)}`);
+        setStatus("Status: falha ao iniciar reconhecimento de voz da calibracao.");
+        finalizar();
+        return false;
+      }
+    };
+
+    if (!iniciarRecognition()) {
+      return;
+    }
+
+    timeoutStopTimer = window.setTimeout(() => {
+      try {
+        recognition.stop();
+      } catch (error) {
+        debug(`Falha ao parar SpeechRecognition na calibracao: ${error.message || String(error)}`);
+        finalizar();
+      }
+      window.setTimeout(() => {
+        finalizar();
       }, 350);
     }, duracaoMs);
   });
