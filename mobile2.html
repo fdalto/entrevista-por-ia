@@ -1,0 +1,1259 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Entrevista com Diarizacao Simples - Mobile2</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style2.css">
+  <style>
+    .calibracao-buttons button.webhook-pending {
+      background: linear-gradient(90deg, #0a2ea6 0%, #1661ff 45%, #7fc4ff 100%);
+      background-size: 260% 100%;
+      animation: webhook-wait-slide 1.35s ease-in-out infinite alternate;
+      box-shadow: 0 0 0 1px rgba(10, 46, 166, 0.7), 0 0 18px rgba(22, 97, 255, 0.55);
+    }
+
+    .calibracao-buttons button.webhook-pending:hover:not(:disabled) {
+      background: linear-gradient(90deg, #0a2ea6 0%, #1661ff 45%, #7fc4ff 100%);
+      background-size: 260% 100%;
+    }
+
+    @keyframes webhook-wait-slide {
+      0% { background-position: 0% 50%; }
+      100% { background-position: 100% 50%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <h1>Transcricao com 2 Speakers</h1>
+
+    <section class="card controls">
+      <div class="buttons calibracao-buttons">
+        <button id="btnCalibrarIndividuo1" type="button">Calibrar Individuo 1</button>
+        <button id="btnCalibrarIndividuo2" type="button">Calibrar Individuo 2</button>
+      </div>
+      <p class="orientacao">Para calibracao fale "Meu nome e NOME".</p>
+      <p class="orientacao">Modo mobile2: audio local + transcricao remota via webhook.</p>
+      <div class="buttons acao-buttons">
+        <button id="btnIniciar" type="button">Iniciar Entrevista</button>
+        <button id="btnFinalizar" type="button" disabled>Finalizar Entrevista</button>
+      </div>
+      <p id="status" class="status">Status: aguardando acao.</p>
+    </section>
+
+    <section id="cardResultadoFinal" class="card card-resultado-final">
+      <div class="resultado-header">
+        <h2>Resultado Final</h2>
+        <div class="resultado-acoes">
+          <button id="btnEnviar" type="button">Enviar para IA</button>
+        </div>
+      </div>
+      <div id="resultadoGrid" class="resultado-grid">
+        <article class="resultado-coluna">
+          <h3>Segmentos marcados</h3>
+          <div id="resultadoSegmentos" class="resultado"></div>
+        </article>
+        <article id="colunaTranscricaoFinal" class="resultado-coluna">
+          <h3>Transcricao final corrida</h3>
+          <div id="transcricaoFinal" class="resultado"></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="cardDebug" class="card card-debug">
+      <div class="debug-header">
+        <h2>Debug</h2>
+        <button id="btnModoDebug" type="button" class="btn-modo">Ativar Modo Debug</button>
+      </div>
+      <div id="debug" class="debug"></div>
+      <div id="promptEditor" class="prompt-editor" hidden>
+        <label class="prompt-label" for="campoPromptIA">Prompt da IA</label>
+        <p class="prompt-hint">Use {{TRANSCRICAO_FINAL}} e {{SEGMENTOS_MARCADOS}} para inserir os blocos automaticamente.</p>
+        <textarea id="campoPromptIA" class="prompt-textarea"></textarea>
+        <div class="prompt-actions">
+          <button id="btnSalvarPromptIA" type="button" class="btn-modo">Salvar</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const CALIBRACAO_MS = 4000;
+    const FEATURE_INTERVAL_MS = 50;
+    const RETENCAO_TIMELINE_MS = 45000;
+    const SEGMENTO_VOL_MIN = 0.012;
+    const VAD_VOL_MIN = SEGMENTO_VOL_MIN;
+    const CALIBRACAO_MIN_FRAMES_VOZ = 5;
+    const CHUNK_MIN_MS = 3500;
+    const CHUNK_MAX_MS = 15000;
+    const MIN_CHUNK_VOZ_RATIO = 0.15;
+    const CHUNK_MIN_VOZ_FRAMES = 5;
+    const VAD_HANGOVER_MS = 450;
+    const SILENCIO_CORTE_MS = 1100;
+    const SILENCIO_MAX_SEM_VOZ_MS = 10000;
+    const SPEAKER_TROCA_DELTA_MIN = 0.12;
+    const SPEAKER_TROCA_CONFIRMACOES = 3;
+    const SPEAKER_TROCA_JANELA_MS = 900;
+    const SPEAKER_TROCA_MIN_DESDE_ULTIMO_CORTE_MS = 1000;
+    const CHUNK_MONITOR_MS = 220;
+    const FEATURE_KEYS = ["ch", "vol", "pit", "zcr", "cent"];
+    const PROMPT_IA_STORAGE_KEY = "entrevista_prompt_ia_personalizado";
+
+    const N8N_URL = "https://n8ndovitordalto.duckdns.org/webhook/ia-whisper";
+    const N8N_BASIC_USER = "entrevista-ia";
+    const N8N_BASIC_PASS = "pass123!@#";
+
+    const els = {
+      btnCalibrarIndividuo1: document.getElementById("btnCalibrarIndividuo1"),
+      btnCalibrarIndividuo2: document.getElementById("btnCalibrarIndividuo2"),
+      btnIniciar: document.getElementById("btnIniciar"),
+      btnFinalizar: document.getElementById("btnFinalizar"),
+      btnModoDebug: document.getElementById("btnModoDebug"),
+      btnEnviar: document.getElementById("btnEnviar"),
+      status: document.getElementById("status"),
+      cardDebug: document.getElementById("cardDebug"),
+      debug: document.getElementById("debug"),
+      promptEditor: document.getElementById("promptEditor"),
+      campoPromptIA: document.getElementById("campoPromptIA"),
+      btnSalvarPromptIA: document.getElementById("btnSalvarPromptIA"),
+      resultadoGrid: document.getElementById("resultadoGrid"),
+      resultadoSegmentos: document.getElementById("resultadoSegmentos"),
+      colunaTranscricaoFinal: document.getElementById("colunaTranscricaoFinal"),
+      transcricaoFinal: document.getElementById("transcricaoFinal")
+    };
+
+    const state = {
+      audioContext: null,
+      stream: null,
+      source: null,
+      splitter: null,
+      analyserL: null,
+      analyserR: null,
+      floatL: null,
+      floatR: null,
+      freqL: null,
+      freqR: null,
+      featureTimer: null,
+      timeline: [],
+      ultimoFeature: null,
+      entrevistaAtiva: false,
+      assinaturaIndividuo1: null,
+      assinaturaIndividuo2: null,
+      pesosFeatures: { ch: 0.2, vol: 0.2, pit: 0.2, zcr: 0.2, cent: 0.2 },
+      nomeIndividuo1: "Individuo 1",
+      nomeIndividuo2: "Individuo 2",
+      calibrando: null,
+      calibracaoBuffer: [],
+      segmentosMarcados: [],
+      transcricaoFinalPartes: [],
+      modoDebugAtivo: false,
+      chunkAtual: null,
+      chunkMonitorTimer: null,
+      speakerTrocaPendente: null,
+      chunkUploadQueue: Promise.resolve(),
+      chunksEmProcessamento: 0,
+      entrevistaLoopId: 0,
+      continuousRecorder: null,
+      audioPartes: [],
+      recorderPartStartMs: 0,
+      segmentPartStartIndex: 0,
+      segmentStartMs: 0,
+      segmentFrameStartIndex: 0,
+      segmentHadVoice: false,
+      segmentLastVoiceAtMs: 0,
+      segmentBaselineLabel: 0,
+      segmentTrocaConfirmacoes: 0,
+      ultimoCorteMs: 0,
+      calibracaoRequestSeq: {
+        "Individuo 1": 0,
+        "Individuo 2": 0
+      },
+      calibracaoWebhookAguardando: {
+        "Individuo 1": false,
+        "Individuo 2": false
+      }
+    };
+
+    const PROMPT_PADRAO = `Voce e um assistente de entrevistas. Com base no BLOCO 1 (transcricao corrida) e BLOCO 2 (segmentos marcados), gere um resumo estruturado da entrevista com:
+1) contexto geral,
+2) principais pontos por interlocutor,
+3) riscos e lacunas,
+4) proximos passos.
+
+BLOCO 1 - TRANSCRICAO FINAL:
+{{TRANSCRICAO_FINAL}}
+
+BLOCO 2 - SEGMENTOS MARCADOS:
+{{SEGMENTOS_MARCADOS}}`;
+
+    boot();
+
+    function boot() {
+      els.btnCalibrarIndividuo1.addEventListener("click", () => calibrar("Individuo 1"));
+      els.btnCalibrarIndividuo2.addEventListener("click", () => calibrar("Individuo 2"));
+      els.btnIniciar.addEventListener("click", iniciarEntrevista);
+      els.btnFinalizar.addEventListener("click", finalizarEntrevista);
+      els.btnModoDebug.addEventListener("click", alternarModoDebug);
+      els.btnEnviar.addEventListener("click", enviarParaIA);
+      els.btnSalvarPromptIA.addEventListener("click", salvarPromptIA);
+      carregarPromptIA();
+      atualizarModoInterface();
+      atualizarEstadoControles();
+      setStatus("Status: pronto para calibrar.");
+      debug("Sistema mobile2 iniciado.");
+    }
+
+    function setStatus(texto) {
+      els.status.textContent = texto;
+    }
+
+    function debug(texto) {
+      const linha = `[${new Date().toLocaleTimeString()}] ${texto}\n`;
+      els.debug.textContent = (els.debug.textContent + linha).slice(-9000);
+      els.debug.scrollTop = els.debug.scrollHeight;
+      console.log(texto);
+    }
+
+    function alternarModoDebug() {
+      state.modoDebugAtivo = !state.modoDebugAtivo;
+      atualizarModoInterface();
+      renderizarSegmentosMarcados();
+    }
+
+    function atualizarModoInterface() {
+      els.btnModoDebug.textContent = state.modoDebugAtivo ? "Ativar Modo Normal" : "Ativar Modo Debug";
+      els.cardDebug.classList.toggle("is-collapsed", !state.modoDebugAtivo);
+      els.debug.hidden = !state.modoDebugAtivo;
+      els.promptEditor.hidden = !state.modoDebugAtivo;
+      els.promptEditor.classList.toggle("is-hidden", !state.modoDebugAtivo);
+      els.colunaTranscricaoFinal.hidden = !state.modoDebugAtivo;
+      els.colunaTranscricaoFinal.classList.toggle("is-hidden", !state.modoDebugAtivo);
+      els.resultadoGrid.classList.toggle("modo-normal", !state.modoDebugAtivo);
+    }
+
+    function calibracoesConcluidas() {
+      return !!state.assinaturaIndividuo1 && !!state.assinaturaIndividuo2;
+    }
+
+    function atualizarEstadoControles() {
+      const prontoParaIniciar = calibracoesConcluidas() && !state.calibrando && !state.entrevistaAtiva;
+      els.btnIniciar.disabled = !prontoParaIniciar;
+      els.btnFinalizar.disabled = !state.entrevistaAtiva;
+      els.btnCalibrarIndividuo1.disabled = !!state.calibrando || state.entrevistaAtiva;
+      els.btnCalibrarIndividuo2.disabled = !!state.calibrando || state.entrevistaAtiva;
+      els.btnCalibrarIndividuo1.classList.toggle("calibrado", !!state.assinaturaIndividuo1);
+      els.btnCalibrarIndividuo2.classList.toggle("calibrado", !!state.assinaturaIndividuo2);
+      atualizarVisualBotaoCalibracao(
+        els.btnCalibrarIndividuo1,
+        "Calibrar Individuo 1",
+        !!state.calibracaoWebhookAguardando["Individuo 1"]
+      );
+      atualizarVisualBotaoCalibracao(
+        els.btnCalibrarIndividuo2,
+        "Calibrar Individuo 2",
+        !!state.calibracaoWebhookAguardando["Individuo 2"]
+      );
+    }
+
+    function atualizarVisualBotaoCalibracao(botao, rotuloBase, aguardandoWebhook) {
+      if (!botao) return;
+      botao.classList.toggle("webhook-pending", aguardandoWebhook);
+      botao.textContent = aguardandoWebhook ? `${rotuloBase} (Aguardando...)` : rotuloBase;
+      botao.setAttribute("aria-busy", aguardandoWebhook ? "true" : "false");
+    }
+
+    function clamp(v, min, max) {
+      return Math.max(min, Math.min(max, v));
+    }
+
+    function obterAudioConstraintsCompat() {
+      return {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: 16000
+      };
+    }
+
+    function escolherMimeType() {
+      const candidatos = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+        "audio/mp4"
+      ];
+      for (const tipo of candidatos) {
+        if (window.MediaRecorder && window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(tipo)) {
+          return tipo;
+        }
+      }
+      return "";
+    }
+
+    function nomeArquivo(mimeType) {
+      if ((mimeType || "").includes("ogg")) return "audio.ogg";
+      if ((mimeType || "").includes("mp4")) return "audio.m4a";
+      return "audio.webm";
+    }
+
+    function rms(buffer) {
+      if (!buffer || !buffer.length) return 0;
+      let soma = 0;
+      for (let i = 0; i < buffer.length; i += 1) {
+        soma += buffer[i] * buffer[i];
+      }
+      return Math.sqrt(soma / buffer.length);
+    }
+
+    function criarSinalMixado(left, right) {
+      const out = new Float32Array(left.length);
+      for (let i = 0; i < out.length; i += 1) {
+        out[i] = (left[i] + right[i]) * 0.5;
+      }
+      return out;
+    }
+
+    function calcularZeroCrossingRate(buffer) {
+      if (!buffer || buffer.length < 2) return 0;
+      let cruzamentos = 0;
+      let ultimo = buffer[0] >= 0;
+      for (let i = 1; i < buffer.length; i += 1) {
+        const atual = buffer[i] >= 0;
+        if (atual !== ultimo) {
+          cruzamentos += 1;
+          ultimo = atual;
+        }
+      }
+      return clamp(cruzamentos / buffer.length, 0, 1);
+    }
+
+    function detectarPitchNormalizado(buffer, sampleRate) {
+      const size = Math.min(buffer.length, 2048);
+      if (size < 128) return 0;
+      const minLag = Math.floor(sampleRate / 350);
+      const maxLag = Math.floor(sampleRate / 75);
+      let melhorLag = 0;
+      let melhorCorr = 0;
+      for (let lag = minLag; lag <= maxLag; lag += 1) {
+        let soma = 0;
+        for (let i = 0; i < size - lag; i += 1) {
+          soma += buffer[i] * buffer[i + lag];
+        }
+        if (soma > melhorCorr) {
+          melhorCorr = soma;
+          melhorLag = lag;
+        }
+      }
+      if (!melhorLag || melhorCorr <= 0) return 0;
+      const freq = sampleRate / melhorLag;
+      return clamp((freq - 75) / (350 - 75), 0, 1);
+    }
+
+    function calcularCentroidNormalizado(freq, sampleRate) {
+      let somaMag = 0;
+      let somaFreq = 0;
+      const nyquist = sampleRate * 0.5;
+      const size = freq.length;
+      for (let i = 0; i < size; i += 1) {
+        const mag = freq[i];
+        const hz = (i / Math.max(1, size - 1)) * nyquist;
+        somaMag += mag;
+        somaFreq += hz * mag;
+      }
+      if (somaMag <= 0) return 0;
+      const centroid = somaFreq / somaMag;
+      return clamp((centroid - 80) / (4000 - 80), 0, 1);
+    }
+
+    function extrairFeatureFrame() {
+      if (!state.analyserL || !state.analyserR) {
+        return null;
+      }
+      state.analyserL.getFloatTimeDomainData(state.floatL);
+      state.analyserR.getFloatTimeDomainData(state.floatR);
+      state.analyserL.getByteFrequencyData(state.freqL);
+      state.analyserR.getByteFrequencyData(state.freqR);
+
+      const rmsL = rms(state.floatL);
+      const rmsR = rms(state.floatR);
+      const mix = criarSinalMixado(state.floatL, state.floatR);
+      const avgFreq = new Uint8Array(state.freqL.length);
+      for (let i = 0; i < avgFreq.length; i += 1) {
+        avgFreq[i] = (state.freqL[i] + state.freqR[i]) * 0.5;
+      }
+
+      return {
+        time: performance.now(),
+        ch: clamp((rmsL - rmsR) / (rmsL + rmsR + 1e-6), -1, 1),
+        vol: clamp((rmsL + rmsR) * 0.5, 0, 1),
+        pit: detectarPitchNormalizado(mix, state.audioContext.sampleRate),
+        zcr: calcularZeroCrossingRate(mix),
+        cent: calcularCentroidNormalizado(avgFreq, state.audioContext.sampleRate)
+      };
+    }
+
+    async function setupAudioEngine({ stream, forCalibration = false } = {}) {
+      if (state.audioContext) {
+        await teardownAudioEngine();
+      }
+      const mediaStream = stream || await navigator.mediaDevices.getUserMedia({ audio: obterAudioConstraintsCompat() });
+      const audioContext = new AudioContext();
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
+      const source = audioContext.createMediaStreamSource(mediaStream);
+      const splitter = audioContext.createChannelSplitter(2);
+      const analyserL = audioContext.createAnalyser();
+      const analyserR = audioContext.createAnalyser();
+      analyserL.fftSize = 2048;
+      analyserR.fftSize = 2048;
+
+      source.connect(splitter);
+      splitter.connect(analyserL, 0);
+      splitter.connect(analyserR, 1);
+
+      state.audioContext = audioContext;
+      state.stream = mediaStream;
+      state.source = source;
+      state.splitter = splitter;
+      state.analyserL = analyserL;
+      state.analyserR = analyserR;
+      state.floatL = new Float32Array(analyserL.fftSize);
+      state.floatR = new Float32Array(analyserR.fftSize);
+      state.freqL = new Uint8Array(analyserL.frequencyBinCount);
+      state.freqR = new Uint8Array(analyserR.frequencyBinCount);
+
+      state.featureTimer = window.setInterval(() => {
+        const f = extrairFeatureFrame();
+        if (!f) return;
+        state.ultimoFeature = f;
+        state.timeline.push(f);
+        const limite = performance.now() - RETENCAO_TIMELINE_MS;
+        while (state.timeline.length && state.timeline[0].time < limite) {
+          state.timeline.shift();
+        }
+        if (forCalibration && state.calibrando) {
+          state.calibracaoBuffer.push(f);
+        }
+        if (state.entrevistaAtiva && !forCalibration && state.chunkAtual && (f.vol || 0) >= VAD_VOL_MIN) {
+          state.chunkAtual.lastVoiceAt = f.time;
+          state.chunkAtual.hadVoice = true;
+        }
+      }, FEATURE_INTERVAL_MS);
+    }
+
+    async function teardownAudioEngine() {
+      if (state.featureTimer) {
+        window.clearInterval(state.featureTimer);
+        state.featureTimer = null;
+      }
+      if (state.stream) {
+        state.stream.getTracks().forEach((track) => track.stop());
+      }
+      if (state.audioContext) {
+        try {
+          await state.audioContext.close();
+        } catch (_err) {}
+      }
+      state.audioContext = null;
+      state.stream = null;
+      state.source = null;
+      state.splitter = null;
+      state.analyserL = null;
+      state.analyserR = null;
+      state.floatL = null;
+      state.floatR = null;
+      state.freqL = null;
+      state.freqR = null;
+    }
+
+    function mediaEdesvioFeatures(frames) {
+      if (!frames || !frames.length) {
+        return null;
+      }
+      const medias = {};
+      const desvios = {};
+      for (const key of FEATURE_KEYS) {
+        let soma = 0;
+        for (const frame of frames) {
+          soma += frame[key] || 0;
+        }
+        medias[key] = soma / frames.length;
+      }
+      for (const key of FEATURE_KEYS) {
+        let soma = 0;
+        for (const frame of frames) {
+          const d = (frame[key] || 0) - medias[key];
+          soma += d * d;
+        }
+        desvios[key] = Math.sqrt(soma / Math.max(1, frames.length));
+      }
+      return { medias, desvios };
+    }
+
+    function formatFeatures(features) {
+      return FEATURE_KEYS.map((k) => `${k}=${Number(features[k] || 0).toFixed(3)}`).join(", ");
+    }
+
+    function classificarFramesCalibracao(framesBrutos) {
+      const validos = [];
+      const motivos = { volume: 0 };
+      for (const frame of framesBrutos) {
+        if ((frame.vol || 0) < SEGMENTO_VOL_MIN) {
+          motivos.volume += 1;
+          continue;
+        }
+        validos.push(frame);
+      }
+      return { validos, motivos };
+    }
+
+    function atualizarPesosAposCalibracao() {
+      if (!state.assinaturaIndividuo1 || !state.assinaturaIndividuo2) {
+        return;
+      }
+      const pesos = {};
+      let soma = 0;
+      for (const key of FEATURE_KEYS) {
+        const diff = Math.abs(state.assinaturaIndividuo1.medias[key] - state.assinaturaIndividuo2.medias[key]);
+        const variabilidade = (state.assinaturaIndividuo1.desvios[key] + state.assinaturaIndividuo2.desvios[key] + 0.03);
+        const score = diff / variabilidade;
+        pesos[key] = Math.max(0.03, score);
+        soma += pesos[key];
+      }
+      for (const key of FEATURE_KEYS) {
+        state.pesosFeatures[key] = pesos[key] / Math.max(1e-6, soma);
+      }
+      debug(`Pesos recalculados: ${formatFeatures(state.pesosFeatures)}`);
+    }
+
+    function dist(features, assinatura) {
+      let soma = 0;
+      for (const key of FEATURE_KEYS) {
+        const base = assinatura.medias[key] || 0;
+        const faixa = assinatura.desvios[key] || 0.06;
+        const z = ((features[key] || 0) - base) / (faixa + 0.02);
+        const peso = state.pesosFeatures[key] || 0.2;
+        soma += Math.abs(z) * peso;
+      }
+      return soma;
+    }
+
+    function classificarSegmento(features) {
+      if (!state.assinaturaIndividuo1 || !state.assinaturaIndividuo2) {
+        return { spk: "?", conf: 0, delta: 0 };
+      }
+      const d1 = dist(features, state.assinaturaIndividuo1);
+      const d2 = dist(features, state.assinaturaIndividuo2);
+      const delta = Math.abs(d1 - d2);
+      const conf = clamp(delta / 0.8, 0, 1);
+      const nome1 = state.nomeIndividuo1 || "Individuo 1";
+      const nome2 = state.nomeIndividuo2 || "Individuo 2";
+      let spk = d1 < d2 ? nome1 : nome2;
+      if (delta < 0.08) {
+        spk = "?";
+      }
+      return { spk, conf, delta };
+    }
+
+    function nomePorLabel(label) {
+      if (label === 1) return state.nomeIndividuo1 || "Individuo 1";
+      if (label === 2) return state.nomeIndividuo2 || "Individuo 2";
+      return "?";
+    }
+
+    function classificarLabelInterim(features) {
+      if (!state.assinaturaIndividuo1 || !state.assinaturaIndividuo2 || !features) {
+        return { label: 0, delta: 0 };
+      }
+      const d1 = dist(features, state.assinaturaIndividuo1);
+      const d2 = dist(features, state.assinaturaIndividuo2);
+      return { label: d1 < d2 ? 1 : 2, delta: Math.abs(d1 - d2) };
+    }
+
+    function agregarFeaturesSegmento(frames) {
+      if (!frames || !frames.length) return null;
+      const out = {};
+      for (const k of FEATURE_KEYS) {
+        let soma = 0;
+        for (const frame of frames) soma += frame[k] || 0;
+        out[k] = soma / frames.length;
+      }
+      return out;
+    }
+
+    function prepararTextoTranscricaoFinal(texto) {
+      return texto == null ? "" : String(texto);
+    }
+
+    function normalizarTokenNome(token) {
+      if (!token) return "";
+      return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+    }
+
+    function contemLetraLatina(valor) {
+      return /[\p{Script=Latin}]/u.test(valor || "");
+    }
+
+    function normalizarNomeExtraido(nome) {
+      if (!nome) return "";
+      const stopwords = new Set([
+        "meu", "nome", "é", "e", "eu", "sou", "me", "chamo",
+        "o", "a", "um", "uma", "de", "da", "do", "dos", "das",
+        "senhor", "senhora", "sr", "sra", "aqui"
+      ]);
+      const tokens = (nome.match(/[\p{L}][\p{L}'-]*/gu) || [])
+        .map((t) => t.trim())
+        .filter((t) => t && contemLetraLatina(t))
+        .filter((t) => !stopwords.has(t.toLowerCase()));
+      if (!tokens.length) {
+        return "";
+      }
+      // Mantem simples: primeiro nome.
+      return normalizarTokenNome(tokens[0]);
+    }
+
+    function extrairNomeDaCalibracao(texto) {
+      const cru = prepararTextoTranscricaoFinal(texto);
+      if (!cru) return "";
+
+      const limpo = cru
+        .replace(/[.,!?;:()[\]{}"']/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!limpo) return "";
+
+      const padroes = [
+        /(?:meu nome(?:\s+é|\s+e)?|me chamo|eu sou|sou o|sou a|aqui é|aqui e)\s+(.+)$/iu
+      ];
+
+      for (const regex of padroes) {
+        const match = limpo.match(regex);
+        if (match && match[1]) {
+          return normalizarNomeExtraido(match[1].trim());
+        }
+      }
+
+      // Fallback conservador: aceita apenas primeira palavra latina limpa.
+      const tokenInicial = (limpo.match(/[\p{L}][\p{L}'-]*/u) || [])[0] || "";
+      if (!tokenInicial || !contemLetraLatina(tokenInicial)) {
+        return "";
+      }
+      return normalizarNomeExtraido(tokenInicial);
+    }
+
+    function adicionarTrechoConsolidado(texto, origem = "webhook") {
+      const trecho = prepararTextoTranscricaoFinal(texto).trim();
+      if (!trecho) return;
+      state.transcricaoFinalPartes.push(trecho);
+      debug(`trecho consolidado (${origem}): ${trecho.slice(0, 120)}`);
+      atualizarTranscricaoFinalUI();
+    }
+
+    function atualizarTranscricaoFinalUI() {
+      els.transcricaoFinal.textContent = state.transcricaoFinalPartes.join(" ").trim();
+    }
+
+    function appendSegmentoMarcado(seg) {
+      const linha = document.createElement("div");
+      linha.className = "linha-segmento";
+      const deltaTxt = Number(seg.delta || 0).toFixed(2);
+      const confTxt = Number(seg.conf || 0).toFixed(2);
+      const inicio = Number(seg.inicioMs || 0) / 1000;
+      const fim = Number(seg.fimMs || 0) / 1000;
+      const prefixoTempo = state.modoDebugAtivo ? `[${inicio.toFixed(2)}s-${fim.toFixed(2)}s] ` : "";
+      linha.textContent = `${prefixoTempo}(${seg.spk}, conf=${confTxt}, delta=${deltaTxt}) ${seg.texto || ""}`;
+      els.resultadoSegmentos.appendChild(linha);
+      els.resultadoSegmentos.scrollTop = els.resultadoSegmentos.scrollHeight;
+    }
+
+    function renderizarSegmentosMarcados() {
+      els.resultadoSegmentos.innerHTML = "";
+      for (const seg of state.segmentosMarcados) {
+        appendSegmentoMarcado(seg);
+      }
+    }
+
+    function resetarSaidaEntrevista() {
+      state.segmentosMarcados = [];
+      state.transcricaoFinalPartes = [];
+      state.timeline = [];
+      state.ultimoFeature = null;
+      state.speakerTrocaPendente = null;
+      state.chunkAtual = null;
+      state.audioPartes = [];
+      state.recorderPartStartMs = 0;
+      state.segmentPartStartIndex = 0;
+      state.segmentStartMs = 0;
+      state.segmentFrameStartIndex = 0;
+      state.segmentHadVoice = false;
+      state.segmentLastVoiceAtMs = 0;
+      state.segmentBaselineLabel = 0;
+      state.segmentTrocaConfirmacoes = 0;
+      state.ultimoCorteMs = 0;
+      els.resultadoSegmentos.innerHTML = "";
+      els.transcricaoFinal.textContent = "";
+    }
+
+    function montarPromptComBlocos(template, transcricaoFinal, segmentosMarcados) {
+      const base = (template || PROMPT_PADRAO).trim();
+      return base
+        .replaceAll("{{TRANSCRICAO_FINAL}}", transcricaoFinal || "")
+        .replaceAll("{{SEGMENTOS_MARCADOS}}", segmentosMarcados || "");
+    }
+
+    function carregarPromptIA() {
+      const salvo = localStorage.getItem(PROMPT_IA_STORAGE_KEY);
+      els.campoPromptIA.value = (salvo && salvo.trim()) ? salvo : PROMPT_PADRAO;
+    }
+
+    function salvarPromptIA() {
+      localStorage.setItem(PROMPT_IA_STORAGE_KEY, els.campoPromptIA.value || PROMPT_PADRAO);
+      setStatus("Status: prompt salvo.");
+      debug("Prompt da IA salvo no localStorage.");
+    }
+
+    async function enviarParaIA() {
+      const transcricaoFinal = (els.transcricaoFinal.textContent || "").trim();
+      const segmentosMarcados = (els.resultadoSegmentos.textContent || "").trim();
+      const prompt = montarPromptComBlocos(els.campoPromptIA.value, transcricaoFinal, segmentosMarcados);
+      try {
+        await navigator.clipboard.writeText(prompt);
+        setStatus("Status: prompt copiado para area de transferencia.");
+      } catch (_err) {
+        setStatus("Status: nao foi possivel copiar automaticamente; prompt exibido no debug.");
+      }
+      debug("Prompt final gerado para IA:");
+      debug(prompt);
+    }
+
+    function extrairTextoDaRespostaWebhook(payload) {
+      if (payload == null) return "";
+      if (typeof payload === "string") return payload.trim();
+      if (Array.isArray(payload)) {
+        for (const item of payload) {
+          const texto = extrairTextoDaRespostaWebhook(item);
+          if (texto) return texto;
+        }
+        return "";
+      }
+      const candidatos = [
+        "text",
+        "texto",
+        "transcript",
+        "transcricao",
+        "transcription",
+        "output",
+        "message",
+        "result"
+      ];
+      for (const chave of candidatos) {
+        if (payload[chave] != null) {
+          const texto = extrairTextoDaRespostaWebhook(payload[chave]);
+          if (texto) return texto;
+        }
+      }
+      if (payload.data != null) {
+        const texto = extrairTextoDaRespostaWebhook(payload.data);
+        if (texto) return texto;
+      }
+      return "";
+    }
+
+    async function enviarBlobParaWebhook(audioBlob, metadados = {}) {
+      const formData = new FormData();
+      formData.append("audio", audioBlob, nomeArquivo(audioBlob.type));
+      formData.append("origem", "mobile2-html");
+      formData.append("duracao_ms", String(Math.max(0, Math.round(metadados.duracaoMs || 0))));
+      formData.append("contexto", metadados.contexto || "entrevista");
+      if (metadados.idioma) formData.append("idioma", String(metadados.idioma));
+      if (metadados.chunkInicioMs != null) formData.append("chunk_inicio_ms", String(Math.round(metadados.chunkInicioMs)));
+      if (metadados.chunkFimMs != null) formData.append("chunk_fim_ms", String(Math.round(metadados.chunkFimMs)));
+
+      const auth = "Basic " + btoa(`${N8N_BASIC_USER}:${N8N_BASIC_PASS}`);
+      const response = await fetch(N8N_URL, {
+        method: "POST",
+        headers: {
+          Authorization: auth
+        },
+        body: formData
+      });
+
+      const rawText = await response.text();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(rawText);
+      } catch (_err) {
+        parsed = rawText;
+      }
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${typeof parsed === "string" ? parsed : JSON.stringify(parsed)}`);
+      }
+      const texto = extrairTextoDaRespostaWebhook(parsed);
+      return {
+        texto: prepararTextoTranscricaoFinal(texto).trim(),
+        bruto: parsed
+      };
+    }
+
+    async function gravarBlobDoStream(stream, duracaoMs) {
+      if (!window.MediaRecorder) {
+        throw new Error("MediaRecorder indisponivel no navegador.");
+      }
+      const mimeType = escolherMimeType();
+      const options = mimeType
+        ? { mimeType, audioBitsPerSecond: 24000 }
+        : { audioBitsPerSecond: 24000 };
+      const chunks = [];
+      const recorder = new MediaRecorder(stream, options);
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+      await new Promise((resolve, reject) => {
+        recorder.onerror = (event) => reject(event.error || new Error("falha na gravacao"));
+        recorder.onstop = () => resolve();
+        recorder.start();
+        window.setTimeout(() => {
+          try {
+            if (recorder.state !== "inactive") recorder.stop();
+          } catch (err) {
+            reject(err);
+          }
+        }, duracaoMs);
+      });
+      return new Blob(chunks, { type: mimeType || (chunks[0] && chunks[0].type) || "audio/webm" });
+    }
+
+    async function calibrar(nome) {
+      if (state.entrevistaAtiva) {
+        setStatus("Status: finalize a entrevista antes de calibrar.");
+        return;
+      }
+      if (state.calibracaoWebhookAguardando[nome]) {
+        setStatus(`Status: ${nome} ainda aguardando resposta do webhook.`);
+        return;
+      }
+      if (state.calibrando) {
+        setStatus("Status: ja existe calibracao em andamento.");
+        return;
+      }
+
+      state.calibrando = nome;
+      state.calibracaoBuffer = [];
+      atualizarEstadoControles();
+      let calibracaoConcluida = false;
+      let blobCalibracao = null;
+      let rotuloAtual = nome;
+      const seq = (state.calibracaoRequestSeq[nome] || 0) + 1;
+      state.calibracaoRequestSeq[nome] = seq;
+
+      try {
+        setStatus(`Status: capturando calibracao de ${nome} por ${CALIBRACAO_MS / 1000}s...`);
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: obterAudioConstraintsCompat() });
+        await setupAudioEngine({ stream, forCalibration: true });
+        blobCalibracao = await gravarBlobDoStream(stream, CALIBRACAO_MS);
+        const diagnosticoFrames = classificarFramesCalibracao(state.calibracaoBuffer.slice());
+        const framesVoz = diagnosticoFrames.validos;
+
+        if (framesVoz.length < CALIBRACAO_MIN_FRAMES_VOZ) {
+          setStatus("Status: poucos frames de voz na calibracao. Tente novamente falando mais perto e continuo.");
+          debug(`Falha calibracao ${nome}: framesVoz=${framesVoz.length}`);
+          return;
+        }
+
+        const assinatura = mediaEdesvioFeatures(framesVoz);
+        if (!assinatura) {
+          setStatus(`Status: falha na calibracao de ${nome}.`);
+          return;
+        }
+
+        if (nome === "Individuo 1") {
+          state.assinaturaIndividuo1 = assinatura;
+          state.nomeIndividuo1 = state.nomeIndividuo1 || "Individuo 1";
+          rotuloAtual = state.nomeIndividuo1;
+        } else {
+          state.assinaturaIndividuo2 = assinatura;
+          state.nomeIndividuo2 = state.nomeIndividuo2 || "Individuo 2";
+          rotuloAtual = state.nomeIndividuo2;
+        }
+
+        atualizarPesosAposCalibracao();
+        calibracaoConcluida = true;
+        setStatus(`Status: assinatura de ${nome} concluida (${rotuloAtual}). Aguardando transcricao do nome...`);
+        debug(`Frames calibracao ${nome}: voz=${framesVoz.length}`);
+        debug(`Assinatura ${rotuloAtual}: ${formatFeatures(assinatura.medias)}`);
+      } catch (error) {
+        setStatus("Status: erro na calibracao.");
+        debug(`Erro de calibracao: ${error.message || String(error)}`);
+      } finally {
+        state.calibrando = null;
+        state.calibracaoBuffer = [];
+        await teardownAudioEngine();
+        atualizarEstadoControles();
+        debug(calibracaoConcluida ? "Captura de calibracao concluida." : "Calibracao encerrada com falha.");
+      }
+
+      if (!calibracaoConcluida || !blobCalibracao) {
+        return;
+      }
+
+      state.calibracaoWebhookAguardando[nome] = true;
+      atualizarEstadoControles();
+
+      try {
+        const resposta = await enviarBlobParaWebhook(blobCalibracao, {
+          contexto: "calibracao",
+          duracaoMs: CALIBRACAO_MS,
+          idioma: "pt"
+        });
+
+        // Ignora resposta antiga se houver recalibracao mais nova do mesmo individuo.
+        if ((state.calibracaoRequestSeq[nome] || 0) !== seq) {
+          debug(`Resposta de transcricao da calibracao ${nome} ignorada (stale).`);
+          return;
+        }
+
+        const textoCalibracao = resposta.texto || "";
+        const nomeExtraido = extrairNomeDaCalibracao(textoCalibracao);
+        if (nomeExtraido) {
+          if (nome === "Individuo 1") {
+            state.nomeIndividuo1 = nomeExtraido;
+            rotuloAtual = state.nomeIndividuo1;
+          } else {
+            state.nomeIndividuo2 = nomeExtraido;
+            rotuloAtual = state.nomeIndividuo2;
+          }
+        } else {
+          rotuloAtual = nome === "Individuo 1" ? (state.nomeIndividuo1 || "Individuo 1") : (state.nomeIndividuo2 || "Individuo 2");
+          debug(`Nome nao identificado com confianca na calibracao de ${nome}; mantendo rotulo ${rotuloAtual}.`);
+        }
+
+        setStatus(`Status: calibracao de ${nome} concluida (${rotuloAtual}).`);
+        debug(`Texto calibracao ${nome}: "${textoCalibracao || ""}"`);
+        debug("Calibracao concluida.");
+      } catch (errorWebhook) {
+        setStatus(`Status: assinatura de ${nome} ok, mas falha na transcricao do nome.`);
+        debug(`Erro na transcricao da calibracao ${nome}: ${errorWebhook.message || String(errorWebhook)}`);
+      } finally {
+        state.calibracaoWebhookAguardando[nome] = false;
+        atualizarEstadoControles();
+      }
+    }
+
+    function iniciarChunkAtual() {
+      if (!state.stream) {
+        throw new Error("Stream de entrevista indisponivel para iniciar chunk.");
+      }
+      if (!window.MediaRecorder) {
+        throw new Error("MediaRecorder indisponivel no navegador.");
+      }
+      const mimeType = escolherMimeType();
+      const options = mimeType ? { mimeType, audioBitsPerSecond: 24000 } : { audioBitsPerSecond: 24000 };
+      const recorder = new MediaRecorder(state.stream, options);
+      const chunks = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+      recorder.start(500);
+      const agora = performance.now();
+      state.chunkAtual = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        recorder,
+        chunks,
+        mimeType,
+        startPerfMs: agora,
+        startTimelineIndex: state.timeline.length,
+        lastVoiceAt: agora,
+        hadVoice: false,
+        baselineLabel: 0,
+        trocaConfirmacoes: 0
+      };
+      debug(`chunk iniciado: ${state.chunkAtual.id}`);
+    }
+
+    function avaliarTrocaSpeakerChunk(agora) {
+      const chunk = state.chunkAtual;
+      if (!chunk) {
+        return false;
+      }
+      const inicio = agora - SPEAKER_TROCA_JANELA_MS;
+      const janela = state.timeline.filter((f) => f.time >= inicio && f.time <= agora && (f.vol || 0) >= VAD_VOL_MIN);
+      if (janela.length < 5) {
+        return false;
+      }
+      const medias = agregarFeaturesSegmento(janela);
+      const classif = classificarLabelInterim(medias);
+      if (!classif.label || classif.delta < SPEAKER_TROCA_DELTA_MIN) {
+        return false;
+      }
+      if (!chunk.baselineLabel) {
+        chunk.baselineLabel = classif.label;
+        chunk.trocaConfirmacoes = 0;
+        return false;
+      }
+      if (classif.label === chunk.baselineLabel) {
+        chunk.trocaConfirmacoes = 0;
+        return false;
+      }
+      chunk.trocaConfirmacoes += 1;
+      if (chunk.trocaConfirmacoes < SPEAKER_TROCA_CONFIRMACOES) {
+        return false;
+      }
+      state.speakerTrocaPendente = {
+        from: nomePorLabel(chunk.baselineLabel),
+        to: nomePorLabel(classif.label),
+        delta: classif.delta
+      };
+      chunk.baselineLabel = classif.label;
+      chunk.trocaConfirmacoes = 0;
+      return true;
+    }
+
+    function calcularMetricasChunk(payload) {
+      const frames = Array.isArray(payload.frames) ? payload.frames : [];
+      const framesTotal = frames.length;
+      const framesVoz = frames.filter((f) => (f.vol || 0) >= VAD_VOL_MIN).length;
+      const vozRatio = framesTotal > 0 ? (framesVoz / framesTotal) : 0;
+      const duracaoMs = Math.max(0, (payload.fimPerfMs || 0) - (payload.startPerfMs || 0));
+      const fraco = duracaoMs < CHUNK_MIN_MS || vozRatio < MIN_CHUNK_VOZ_RATIO || framesVoz < CHUNK_MIN_VOZ_FRAMES;
+      return { duracaoMs, framesTotal, framesVoz, vozRatio, fraco };
+    }
+
+    async function encerrarChunkAtual(motivo, opcoes = {}) {
+      const forcar = !!opcoes.forcar;
+      const chunk = state.chunkAtual;
+      if (!chunk || chunk.encerrando) {
+        return;
+      }
+      const fimPerfMs = performance.now();
+      const duracao = Math.max(0, fimPerfMs - chunk.startPerfMs);
+      if (!forcar && duracao < 300) {
+        return;
+      }
+      chunk.encerrando = true;
+      await new Promise((resolve, reject) => {
+        chunk.recorder.addEventListener("stop", resolve, { once: true });
+        chunk.recorder.addEventListener("error", (event) => reject(event.error || new Error("falha ao fechar chunk")), { once: true });
+        try {
+          if (chunk.recorder.state !== "inactive") {
+            chunk.recorder.stop();
+          } else {
+            resolve();
+          }
+        } catch (error) {
+          reject(error);
+        }
+      });
+      const blob = new Blob(chunk.chunks, {
+        type: chunk.mimeType || (chunk.chunks[0] && chunk.chunks[0].type) || "audio/webm"
+      });
+      if (!blob || blob.size === 0) {
+        debug(`chunk vazio descartado: ${chunk.id}`);
+        state.chunkAtual = null;
+        if (state.entrevistaAtiva) {
+          iniciarChunkAtual();
+        }
+        return;
+      }
+      const payload = {
+        id: chunk.id,
+        motivo,
+        blob,
+        startPerfMs: chunk.startPerfMs,
+        fimPerfMs,
+        frames: state.timeline.slice(chunk.startTimelineIndex, state.timeline.length)
+      };
+      state.ultimoCorteMs = fimPerfMs;
+      debug(`chunk fechado: ${payload.id} (${motivo})`);
+      state.chunkAtual = null;
+
+      state.chunkUploadQueue = state.chunkUploadQueue
+        .then(() => processarSegmentoParaEnvio(payload))
+        .catch((err) => debug(`erro na fila de envio: ${err.message || String(err)}`));
+
+      if (state.entrevistaAtiva) {
+        iniciarChunkAtual();
+      }
+    }
+
+    function avaliarCriterioCorte(agora) {
+      const chunk = state.chunkAtual;
+      if (!chunk) {
+        return "";
+      }
+      const duracao = Math.max(0, agora - chunk.startPerfMs);
+      const silencioMs = chunk.hadVoice ? Math.max(0, agora - (chunk.lastVoiceAt + VAD_HANGOVER_MS)) : duracao;
+
+      // Evita fatiamento em silêncio: só corta se já houve voz no chunk.
+      if (!chunk.hadVoice) {
+        return "";
+      }
+
+      if (duracao >= CHUNK_MAX_MS) {
+        return "maximo";
+      }
+      if (duracao >= CHUNK_MIN_MS && chunk.hadVoice && silencioMs >= SILENCIO_CORTE_MS) {
+        return "pausa";
+      }
+      if (
+        duracao >= CHUNK_MIN_MS &&
+        agora - state.ultimoCorteMs >= SPEAKER_TROCA_MIN_DESDE_ULTIMO_CORTE_MS &&
+        avaliarTrocaSpeakerChunk(agora)
+      ) {
+        return "troca_speaker";
+      }
+      return "";
+    }
+
+    function iniciarMonitorChunk(loopId) {
+      if (state.chunkMonitorTimer) {
+        window.clearInterval(state.chunkMonitorTimer);
+      }
+      state.chunkMonitorTimer = window.setInterval(() => {
+        if (!state.entrevistaAtiva || loopId !== state.entrevistaLoopId || !state.chunkAtual) {
+          return;
+        }
+        const agora = performance.now();
+        const motivo = avaliarCriterioCorte(agora);
+        if (!motivo) {
+          return;
+        }
+        encerrarChunkAtual(motivo).catch((err) => {
+          debug(`erro ao fechar chunk (${motivo}): ${err.message || String(err)}`);
+        });
+      }, CHUNK_MONITOR_MS);
+    }
+
+    async function processarSegmentoParaEnvio(payload) {
+      const metricas = calcularMetricasChunk(payload);
+      await enviarChunkParaWebhookComMarcacao(payload, metricas, {
+        marcarRuido: metricas.fraco
+      });
+    }
+
+    async function enviarChunkParaWebhookComMarcacao(payload, metricas, opcoes = {}) {
+      state.chunksEmProcessamento += 1;
+      try {
+        const framesVoz = payload.frames.filter((f) => (f.vol || 0) >= SEGMENTO_VOL_MIN);
+        const medias = agregarFeaturesSegmento(framesVoz.length ? framesVoz : payload.frames) || state.ultimoFeature || {
+          ch: 0, vol: 0, pit: 0, zcr: 0, cent: 0
+        };
+        const classif = classificarSegmento(medias);
+        const resposta = await enviarBlobParaWebhook(payload.blob, {
+          contexto: "entrevista",
+          duracaoMs: payload.fimPerfMs - payload.startPerfMs,
+          chunkInicioMs: payload.startPerfMs,
+          chunkFimMs: payload.fimPerfMs
+        });
+        const textoWebhook = (resposta.texto || "").trim();
+        const marcarRuido = !!opcoes.marcarRuido;
+        const texto = textoWebhook || (marcarRuido ? "[sem transcricao]" : "");
+        if (!texto) {
+          debug(`chunk ${payload.id} sem texto retornado pelo webhook.`);
+          return;
+        }
+        const spkFinal = marcarRuido ? "ruído?" : classif.spk;
+        const confFinal = marcarRuido ? 0 : classif.conf;
+        const motivoFinal = marcarRuido ? `${payload.motivo}|fraco` : payload.motivo;
+
+        const segmento = {
+          spk: spkFinal,
+          conf: confFinal,
+          delta: classif.delta,
+          ch: medias.ch,
+          vol: medias.vol,
+          pit: medias.pit,
+          zcr: medias.zcr,
+          cent: medias.cent,
+          texto,
+          inicioMs: payload.startPerfMs,
+          fimMs: payload.fimPerfMs,
+          motivo: motivoFinal
+        };
+
+        if (state.speakerTrocaPendente && payload.motivo === "troca_speaker") {
+          debug(`troca detectada: ${state.speakerTrocaPendente.from} -> ${state.speakerTrocaPendente.to}, delta=${state.speakerTrocaPendente.delta.toFixed(2)}`);
+          state.speakerTrocaPendente = null;
+        }
+
+        state.segmentosMarcados.push(segmento);
+        appendSegmentoMarcado(segmento);
+        adicionarTrechoConsolidado(texto, "webhook");
+        setStatus(`Status: chunk processado (${motivoFinal}).`);
+        debug(
+          `chunk enviado: ${payload.id} ` +
+          `(dur=${Math.round(metricas.duracaoMs)}ms, voz=${(metricas.vozRatio * 100).toFixed(1)}%, spk=${spkFinal})`
+        );
+      } catch (error) {
+        debug(`falha no processamento do chunk ${payload.id}: ${error.message || String(error)}`);
+      } finally {
+        state.chunksEmProcessamento -= 1;
+      }
+    }
+
+    async function iniciarEntrevista() {
+      if (state.entrevistaAtiva) return;
+      if (!calibracoesConcluidas()) {
+        setStatus("Status: calibre Individuo 1 e Individuo 2 antes de iniciar.");
+        return;
+      }
+
+      try {
+        resetarSaidaEntrevista();
+        const loopId = Date.now();
+        state.entrevistaLoopId = loopId;
+        state.entrevistaAtiva = true;
+        state.chunkUploadQueue = Promise.resolve();
+        setStatus("Status: entrevista ativa (chunks independentes + cortes inteligentes).");
+
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: obterAudioConstraintsCompat() });
+        await setupAudioEngine({ stream });
+        iniciarChunkAtual();
+        iniciarMonitorChunk(loopId);
+        atualizarEstadoControles();
+        debug("Entrevista iniciada com chunks independentes e cortes por voz/troca/maximo.");
+      } catch (error) {
+        state.entrevistaAtiva = false;
+        atualizarEstadoControles();
+        await teardownAudioEngine();
+        setStatus("Status: nao foi possivel iniciar a entrevista.");
+        debug(`Erro ao iniciar entrevista: ${error.message || String(error)}`);
+      }
+    }
+
+    async function finalizarEntrevista() {
+      if (!state.entrevistaAtiva) return;
+
+      state.entrevistaAtiva = false;
+      atualizarEstadoControles();
+      setStatus("Status: finalizando entrevista...");
+
+      if (state.chunkMonitorTimer) {
+        window.clearInterval(state.chunkMonitorTimer);
+        state.chunkMonitorTimer = null;
+      }
+
+      try {
+        if (state.chunkAtual) {
+          await encerrarChunkAtual("finalizar", { forcar: true });
+        }
+        await state.chunkUploadQueue;
+      } catch (error) {
+        debug(`Erro ao finalizar fila de chunks: ${error.message || String(error)}`);
+      }
+
+      await teardownAudioEngine();
+      atualizarEstadoControles();
+      setStatus("Status: entrevista finalizada.");
+      debug("Entrevista finalizada e recursos liberados.");
+    }
+  </script>
+</body>
+</html>
