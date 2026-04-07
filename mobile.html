@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gravar 4s e enviar ao n8n</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+    .card {
+      width: min(92vw, 520px);
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+      padding: 24px;
+    }
+    h1 {
+      font-size: 22px;
+      margin: 0 0 10px;
+    }
+    p {
+      margin: 0 0 16px;
+      line-height: 1.5;
+      color: #4b5563;
+    }
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 12px;
+      padding: 16px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      background: #2563eb;
+      color: white;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-top: 16px;
+      white-space: pre-wrap;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 12px;
+      min-height: 88px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Teste de gravação</h1>
+    <p>Clique no botão para gravar 4 segundos em mono, com baixa taxa de bits, e enviar o áudio para o n8n usando multipart/form-data.</p>
+    <button id="btnGravar">Gravar 4 segundos e enviar</button>
+    <div id="status" class="status">Pronto.</div>
+  </div>
+
+  <script>
+    const N8N_URL = "https://n8ndovitordalto.duckdns.org/webhook/ia-whisper";
+    const N8N_BASIC_USER = "entrevista-ia";
+    const N8N_BASIC_PASS = "pass123!@#";
+    const GRAVACAO_MS = 4000;
+
+    const btn = document.getElementById('btnGravar');
+    const statusEl = document.getElementById('status');
+
+    btn.addEventListener('click', gravarEEnviar);
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    async function gravarEEnviar() {
+      btn.disabled = true;
+      let stream = null;
+      let recorder = null;
+      let chunks = [];
+
+      try {
+        setStatus('Solicitando microfone...');
+
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 16000
+          }
+        });
+
+        const mimeType = escolherMimeType();
+        const options = mimeType ? {
+          mimeType,
+          audioBitsPerSecond: 24000
+        } : {
+          audioBitsPerSecond: 24000
+        };
+
+        recorder = new MediaRecorder(stream, options);
+        chunks = [];
+
+        recorder.ondataavailable = (event) => {
+          if (event.data && event.data.size > 0) {
+            chunks.push(event.data);
+          }
+        };
+
+        setStatus('Gravando 4 segundos...');
+        recorder.start();
+
+        await esperar(GRAVACAO_MS);
+
+        const blob = await pararRecorder(recorder);
+        const audioBlob = new Blob(chunks.length ? chunks : [blob], {
+          type: mimeType || blob.type || 'audio/webm'
+        });
+
+        setStatus(`Gravação concluída. Tamanho: ${audioBlob.size} bytes.\nEnviando ao n8n...`);
+
+        const formData = new FormData();
+        formData.append('audio', audioBlob, nomeArquivo(audioBlob.type));
+        formData.append('origem', 'teste-html');
+        formData.append('duracao_ms', String(GRAVACAO_MS));
+
+        const auth = 'Basic ' + btoa(`${N8N_BASIC_USER}:${N8N_BASIC_PASS}`);
+
+        const response = await fetch(N8N_URL, {
+          method: 'POST',
+          headers: {
+            Authorization: auth
+          },
+          body: formData
+        });
+
+        const rawText = await response.text();
+        let parsed;
+        try {
+          parsed = JSON.parse(rawText);
+        } catch {
+          parsed = rawText;
+        }
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}\n${typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2)}`);
+        }
+
+        setStatus(
+          'Enviado com sucesso.\n\nResposta do n8n:\n' +
+          (typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2))
+        );
+      } catch (error) {
+        setStatus('Erro:\n' + (error?.message || String(error)));
+      } finally {
+        if (recorder && recorder.state !== 'inactive') {
+          try { recorder.stop(); } catch {}
+        }
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
+        btn.disabled = false;
+      }
+    }
+
+    function escolherMimeType() {
+      const candidatos = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/mp4'
+      ];
+      for (const tipo of candidatos) {
+        if (window.MediaRecorder?.isTypeSupported?.(tipo)) {
+          return tipo;
+        }
+      }
+      return '';
+    }
+
+    function nomeArquivo(mimeType) {
+      if (mimeType.includes('ogg')) return 'audio.ogg';
+      if (mimeType.includes('mp4')) return 'audio.m4a';
+      return 'audio.webm';
+    }
+
+    function esperar(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function pararRecorder(recorder) {
+      return new Promise((resolve, reject) => {
+        const onStop = () => {
+          cleanup();
+          resolve(new Blob([]));
+        };
+        const onError = (event) => {
+          cleanup();
+          reject(event?.error || new Error('Falha ao finalizar gravação.'));
+        };
+        function cleanup() {
+          recorder.removeEventListener('stop', onStop);
+          recorder.removeEventListener('error', onError);
+        }
+        recorder.addEventListener('stop', onStop, { once: true });
+        recorder.addEventListener('error', onError, { once: true });
+        try {
+          recorder.stop();
+        } catch (err) {
+          cleanup();
+          reject(err);
+        }
+      });
+    }
+  </script>
+</body>
+</html>
