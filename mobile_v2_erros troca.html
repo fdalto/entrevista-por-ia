@@ -1,34 +1,42 @@
-﻿<!DOCTYPE html>
-<!-- Estrategia v5: a transcricao continua em tempo real, mas a analise acustica vem de chunks locais gravados com MediaRecorder e analisados depois no proprio navegador. -->
+<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Entrevista com Diarizacao Simples - v6v5</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0e6f8d">
+  <title>Entrevista com Diarizacao Simples - Mobile v2</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="style2.css">
+  <link rel="stylesheet" href="mobile_v2.css">
 </head>
 <body>
   <main class="app">
-    <h1>Transcricao com 2 Speakers</h1>
+    <header class="hero">
+      <p class="eyebrow">Mobile v2</p>
+      <h1>Transcricao com 2 Speakers</h1>
+      <p class="hero-copy">Versao mobile com gravacao continua, analise local separada e envio robusto para o webhook.</p>
+    </header>
 
     <section class="card controls">
       <div class="buttons calibracao-buttons">
         <button id="btnCalibrarIndividuo1" type="button">Calibrar Individuo 1</button>
         <button id="btnCalibrarIndividuo2" type="button">Calibrar Individuo 2</button>
       </div>
-      <p class="orientacao">Para calibracao fale "Meu nome Ã© NOME".</p>
-      <p class="orientacao"></p>
+      <p class="orientacao">Para calibracao fale "Meu nome e NOME".</p>
+      <p class="orientacao">Modo mobile v2: analise local no bruto + gravacao mono derivada para envio.</p>
+      <p id="audioResumo" class="orientacao orientacao-secundaria" aria-live="polite">Audio ainda nao inicializado.</p>
       <div class="buttons acao-buttons">
         <button id="btnIniciar" type="button">Iniciar Entrevista</button>
         <button id="btnFinalizar" type="button" disabled>Finalizar Entrevista</button>
       </div>
-      <p id="status" class="status">Status: aguardando acao.</p>
+      <p id="status" class="status" aria-live="polite">Status: aguardando acao.</p>
     </section>
 
     <section id="cardResultadoFinal" class="card card-resultado-final">
       <div class="resultado-header">
-        <h2>Resultado Final</h2>
+        <div>
+          <h2>Resultado Final</h2>
+          <p class="subcopy">Segmentos, transcricao corrida e rastreio da sessao.</p>
+        </div>
         <div class="resultado-acoes">
           <button id="btnEnviar" type="button">Enviar para IA</button>
         </div>
@@ -36,18 +44,21 @@
       <div id="resultadoGrid" class="resultado-grid">
         <article class="resultado-coluna">
           <h3>Segmentos marcados</h3>
-          <div id="resultadoSegmentos" class="resultado"></div>
+          <div id="resultadoSegmentos" class="resultado" aria-live="polite"></div>
         </article>
         <article id="colunaTranscricaoFinal" class="resultado-coluna">
           <h3>Transcricao final corrida</h3>
-          <div id="transcricaoFinal" class="resultado"></div>
+          <div id="transcricaoFinal" class="resultado" aria-live="polite"></div>
         </article>
       </div>
     </section>
 
     <section id="cardDebug" class="card card-debug">
       <div class="debug-header">
-        <h2>Debug</h2>
+        <div>
+          <h2>Debug</h2>
+          <p class="subcopy">Logs de audio, segmentacao, fusao e webhook.</p>
+        </div>
         <button id="btnModoDebug" type="button" class="btn-modo">Ativar Modo Debug</button>
       </div>
       <div id="debug" class="debug"></div>
@@ -62,8 +73,6 @@
     </section>
   </main>
 
-  <script src="script6v5.js" defer></script>
+  <script src="mobile_v2.js" defer></script>
 </body>
 </html>
-
-
