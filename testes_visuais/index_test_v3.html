@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Teste Diarizacao v3</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      background: #eee;
+      color: #1f252a;
+      margin: 0;
+      padding: 20px 12px 28px;
+    }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin: 12px auto 18px;
+    }
+
+    .btn {
+      padding: 14px 24px;
+      font-size: 18px;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      font-weight: 700;
+      box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
+    }
+
+    #recordBtn {
+      background: #7bc96f;
+    }
+
+    #testSoundBtn {
+      background: #2f8ecf;
+      color: #fff;
+    }
+
+    #testSoundBtn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .bars {
+      width: min(920px, 100%);
+      margin: 0 auto 18px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(90px, 1fr));
+      gap: 16px 14px;
+      justify-items: center;
+    }
+
+    .bar-wrap {
+      width: 100%;
+      max-width: 110px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .bar-label {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .bar {
+      width: 34px;
+      height: 150px;
+      border: 2px solid #333;
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      align-items: flex-end;
+      background: #fdfdfd;
+      box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.08);
+    }
+
+    .fill {
+      width: 100%;
+      height: 10%;
+      background: linear-gradient(180deg, #4bc870 0%, #2d9550 100%);
+      transition: height 60ms linear, background-color 80ms ease;
+    }
+
+    .bar-wrap[data-bar-name="CHANGE"] .fill {
+      background: linear-gradient(180deg, #ff8b6b 0%, #e04646 100%);
+    }
+
+    .indicators {
+      margin: 10px auto 18px;
+    }
+
+    .indicator {
+      display: inline-block;
+      padding: 10px 20px;
+      background: #ccc;
+      margin: 10px 8px;
+      border-radius: 10px;
+      font-weight: 700;
+      min-width: 110px;
+    }
+
+    .indicator.active {
+      background: red;
+      color: #fff;
+    }
+
+    #scope {
+      width: min(920px, 92vw);
+      max-width: 920px;
+      border: 2px solid #333;
+      background: #fafafa;
+      margin: 16px auto;
+      display: block;
+    }
+
+    #log {
+      width: min(920px, 92vw);
+      margin: 0 auto;
+      padding: 14px;
+      border: 2px solid #333;
+      border-radius: 12px;
+      background: #f7f7f7;
+      text-align: left;
+      white-space: pre-wrap;
+      overflow: auto;
+      min-height: 260px;
+      box-sizing: border-box;
+    }
+
+    #calibrationOverlay {
+      position: fixed;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(92vw, 520px);
+      padding: 16px 14px;
+      border-radius: 16px;
+      background: rgba(20, 25, 30, 0.86);
+      color: #fff;
+      z-index: 999;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(3px);
+    }
+
+    #calibrationOverlay.hidden {
+      display: none;
+    }
+
+    .overlay-round {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      opacity: 0.95;
+    }
+
+    .overlay-steps {
+      margin-top: 8px;
+      display: grid;
+      gap: 5px;
+      justify-items: center;
+    }
+
+    .overlay-step {
+      color: #b8bec5;
+      font-size: 18px;
+      font-weight: 600;
+      transition: color 140ms ease, transform 140ms ease, font-size 140ms ease;
+      transform: scale(1);
+    }
+
+    .overlay-step.active {
+      color: #ff4e4e;
+      font-size: 22px;
+      font-weight: 800;
+      transform: scale(1.05);
+    }
+
+    .overlay-countdown {
+      margin-top: 6px;
+      font-size: 44px;
+      line-height: 1;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .overlay-substatus {
+      margin-top: 7px;
+      font-size: 14px;
+      opacity: 0.86;
+    }
+
+    @media (max-width: 640px) {
+      .bars {
+        grid-template-columns: repeat(2, minmax(100px, 1fr));
+      }
+
+      .bar {
+        height: 132px;
+      }
+
+      .overlay-step {
+        font-size: 16px;
+      }
+
+      .overlay-step.active {
+        font-size: 19px;
+      }
+
+      .overlay-countdown {
+        font-size: 38px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <button id="recordBtn" class="btn">GRAVAR</button>
+    <button id="testSoundBtn" class="btn">TESTE DO SOM</button>
+  </div>
+
+  <div class="bars" id="bars"></div>
+
+  <div class="indicators">
+    <div id="cut" class="indicator">CORTE</div>
+    <div id="switch" class="indicator">TROCA</div>
+  </div>
+
+  <canvas id="scope" width="800" height="120"></canvas>
+
+  <pre id="log"></pre>
+
+  <div id="calibrationOverlay" class="hidden" aria-live="polite">
+    <div id="overlayRound" class="overlay-round">RODADA 0/3</div>
+    <div class="overlay-steps">
+      <div id="overlayStepSilence" class="overlay-step">Silencio</div>
+      <div id="overlayStepAaaa" class="overlay-step">DIGA AAAAAAAAAA por 1,5 segundos</div>
+      <div id="overlayStepDynamic" class="overlay-step">Fale normalmente</div>
+    </div>
+    <div id="overlayCountdown" class="overlay-countdown">00:00</div>
+    <div id="overlaySubstatus" class="overlay-substatus">-</div>
+  </div>
+
+  <script src="app_env_v3.js"></script>
+  <script src="render_v3.js"></script>
+  <script src="dinamic_cal_v3.js"></script>
+  <script src="audio_core_v3.js"></script>
+</body>
+</html>
